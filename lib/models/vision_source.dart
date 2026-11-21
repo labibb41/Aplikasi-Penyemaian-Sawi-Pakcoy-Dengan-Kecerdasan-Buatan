@@ -1,0 +1,1 @@
+﻿enum VisionSource { webcam, hp }

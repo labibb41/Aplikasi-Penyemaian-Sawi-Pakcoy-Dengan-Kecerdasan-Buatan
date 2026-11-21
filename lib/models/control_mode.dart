@@ -1,0 +1,1 @@
+﻿enum ControlMode { auto, manual }
