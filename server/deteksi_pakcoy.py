@@ -7,19 +7,21 @@
 """
 
 import os
-import sys
 import warnings
+
 warnings.filterwarnings("ignore")
 
-import numpy as np
 import cv2
-from PIL import Image
+from typing import Any
 import matplotlib
+import numpy as np
+from PIL import Image
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import gradio as gr
-import tensorflow as tf
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+from tensorflow.keras.models import load_model
 from ultralytics import YOLO
 
 # ─────────────────────────────────────────────────────────────
@@ -29,13 +31,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 YOLO_WEIGHTS = os.path.join(BASE_DIR, "exp_pakcoy_yolo26_seg_v4", "weights", "best.pt")
 
+# DAFTAR 3 MODEL MOBILENETV2 TERBAIK & TERBARU
 MOBILENET_MODELS = {
     "MobileNetV2 Optimasi (Terbaru)": os.path.join(BASE_DIR, "mobilenetv2_pakcoy_opt.h5"),
-    "MobileNetV2 Murni (Terbaru)": os.path.join(BASE_DIR, "mobilenetv2_pakcoy_murni.h5"),
-    "MobileNetV2 Augmented":        os.path.join(BASE_DIR, "mobilenetv2_pakcoy_augmented.h5"),
-    "MobileNetV2 V3 (Terbaru)":     os.path.join(BASE_DIR, "mobilenetv2_v3_terbaru.h5"),
-    "MobileNetV2 V2 (Baru)":        os.path.join(BASE_DIR, "mobilenetv2_v2_baru.h5"),
-    "MobileNetV2 V1 (Lama)":        os.path.join(BASE_DIR, "mobilenetv2_v1_lama.h5"),
+    "MobileNetV2 Murni (Terbaru)":    os.path.join(BASE_DIR, "mobilenetv2_pakcoy_murni.h5"),
+    "MobileNetV2 Augmented":          os.path.join(BASE_DIR, "mobilenetv2_pakcoy_augmented.h5"),
 }
 
 CLASS_NAMES   = ["empty", "etiolasi_berat", "etiolasi_ringan", "normal"]
@@ -69,7 +69,7 @@ print("⏳ Loading MobileNetV2 models...")
 mobilenet_models = {}
 for name, path in MOBILENET_MODELS.items():
     if os.path.exists(path):
-        mobilenet_models[name] = tf.keras.models.load_model(path)
+        mobilenet_models[name] = load_model(path, compile=False)
         print(f"  ✅ {name} loaded")
     else:
         print(f"  ⚠️  {name} NOT FOUND: {path}")
@@ -98,7 +98,7 @@ def select_best_leaf_boxes(orig_bgr, bibit_boxes):
     
     scored_boxes = []
     for b in bibit_boxes:
-        x1, y1, x2, y2, yconf, ycls = b
+        x1, y1, x2, y2, _yconf, _ycls = b
         crop = orig_bgr[y1:y2, x1:x2]
         if crop.size == 0:
             continue
@@ -148,30 +148,72 @@ def select_best_leaf_boxes(orig_bgr, bibit_boxes):
 def predict_crop(crop_bgr: np.ndarray,
                  thresh_ringan: float = 0.70,
                  thresh_berat: float = 0.65,
-                 thresh_normal: float = 0.35) -> dict:
+                 thresh_normal: float = 0.35,
+                 bbox: tuple[int, int, int, int] | None = None) -> dict:
     """
-    Jalankan crop melalui semua MobileNetV2 models dengan Fokus Kanopi Daun.
-    Jika daun hijau mekar segar -> Prioritaskan Normal.
+    Jalankan crop melalui model MobileNetV2 dengan Fisiologi Tanaman:
+    - Jika menjulang tinggi atau merebah -> Tetap Etiolasi
+    - Jika batang masih hijau, daun mekar, dan tidak merebah -> Normal
+    - Jika batang putih pucat -> Etiolasi
     """
     x = preprocess_crop(crop_bgr)
     
-    # Cek kepadatan daun hijau dari atas
+    # 1. Analisis Fisik (Menjulang / Merebah)
+    is_menjulang = False
+    is_merebah = False
+    if bbox is not None:
+        bw = max(1, bbox[2] - bbox[0])
+        bh = max(1, bbox[3] - bbox[1])
+        aspect = max(bw, bh) / max(1, min(bw, bh))
+        if aspect >= 1.50 and bh >= 50:
+            is_menjulang = True
+        elif aspect >= 1.50 and bw >= 45:
+            is_merebah = True
+
+    # 2. Analisis Warna (Batang Hijau vs Putih Pucat)
     hsv_c = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
-    mask_c = cv2.inRange(hsv_c, (25, 35, 35), (85, 255, 255))
-    has_good_leaf = np.mean(mask_c > 0) >= 0.08
+    green_mask = cv2.inRange(hsv_c, (25, 45, 45), (85, 255, 255))
+    green_ratio = float(np.mean(green_mask > 0))
+    has_green = green_ratio >= 0.10
+    is_pale = float(np.mean(cv2.inRange(hsv_c, (0, 0, 165), (180, 45, 255)) > 0)) >= 0.08
 
     results = {}
     for model_name, model in mobilenet_models.items():
         preds = model.predict(x, verbose=0)[0]  # shape (num_classes,)
         p_berat, p_ringan, p_normal = float(preds[0]), float(preds[1]), float(preds[2])
 
-        # Prioritas Normal: Jika memiliki daun hijau segar mekar -> NORMAL
-        if p_berat >= thresh_berat and p_berat > p_normal and not has_good_leaf:
+        # A. HIJAU DOMINAN (>= 35%) + TIDAK REBAH/MENJULANG → PASTI NORMAL
+        #    (Override model karena model opt.h5 bias berat untuk foto atas)
+        #    35% cukup karena crop sering masuk tanah hitam di sekitar tanaman
+        if green_ratio >= 0.35 and not is_merebah and not is_menjulang:
+            label, conf = "normal", max(p_normal, 0.80)
+        # B. JIKA SUDAH MEREBAH -> ETIOLASI BERAT
+        elif is_merebah:
+            label, conf = "etiolasi_berat", max(p_berat, 0.75)
+        # C. JIKA MENJULANG TINGGI -> ETIOLASI RINGAN / BERAT
+        elif is_menjulang:
+            if p_berat >= 0.50:
+                label, conf = "etiolasi_berat", p_berat
+            else:
+                label, conf = "etiolasi_ringan", max(p_ringan, 0.70)
+        # D. JIKA BATANG PUTIH PUCAT (tanpa klorofil) -> ETIOLASI
+        elif is_pale and green_ratio < 0.30:
+            label = "etiolasi_berat" if p_berat >= p_ringan else "etiolasi_ringan"
+            conf = max(p_berat, p_ringan)
+        # E. HIJAU CUKUP (10-49%) + MODEL SETUJU NORMAL -> NORMAL
+        elif has_green and p_normal >= 0.20:
+            label, conf = "normal", max(p_normal, 0.75)
+        # F. MODEL SANGAT YAKIN ETIOLASI DAN TIDAK TERLALU HIJAU -> ETIOLASI
+        elif p_berat >= 0.80 and green_ratio < 0.40:
             label, conf = "etiolasi_berat", p_berat
-        elif p_ringan >= thresh_ringan and p_ringan > p_normal and not has_good_leaf:
+        elif p_ringan >= 0.80 and green_ratio < 0.40:
             label, conf = "etiolasi_ringan", p_ringan
+        # G. DEFAULT ARGMAX
         else:
-            label, conf = "normal", max(p_normal, 0.85) if has_good_leaf else p_normal
+            max_idx = int(np.argmax([p_berat, p_ringan, p_normal]))
+            cls_map = ["etiolasi_berat", "etiolasi_ringan", "normal"]
+            label = cls_map[max_idx]
+            conf = float([p_berat, p_ringan, p_normal][max_idx])
 
         results[model_name] = (label, conf)
     return results
@@ -198,9 +240,9 @@ def run_pipeline(image_pil: Image.Image,
     h, w     = img_bgr.shape[:2]
 
     # ── 1. YOLO INFERENCE ──────────────────────────────────────
-    yolo_results = yolo_model(img_bgr, conf=yolo_conf, iou=yolo_iou, verbose=False)
-    result       = yolo_results[0]
-    boxes        = result.boxes
+    yolo_results: Any = yolo_model(img_bgr, conf=yolo_conf, iou=yolo_iou, verbose=False)
+    result: Any = yolo_results[0] if isinstance(yolo_results, (list, tuple)) else next(iter(yolo_results))
+    boxes: Any = getattr(result, "boxes", None)
 
     if boxes is None or len(boxes) == 0:
         return image_pil, "⚠️ Tidak ada objek terdeteksi oleh YOLO.", "", "", "", None
@@ -232,7 +274,7 @@ def run_pipeline(image_pil: Image.Image,
         crop = img_bgr[y1:y2, x1:x2]
         if crop.size == 0:
             continue
-        mob_preds = predict_crop(crop, thresh_ringan, thresh_berat, thresh_normal)
+        mob_preds = predict_crop(crop, thresh_ringan, thresh_berat, thresh_normal, bbox=(x1, y1, x2, y2))
         all_results.append({
             "bbox":      (x1, y1, x2, y2),
             "yolo_conf": yconf,
@@ -250,7 +292,7 @@ def run_pipeline(image_pil: Image.Image,
         "MobileNetV2 Augmented",
         "MobileNetV2 V3 (Terbaru)"
     ]
-    PRIMARY_MODEL = next((m for m in preferred_models if m in mobilenet_models), list(mobilenet_models.keys())[0] if mobilenet_models else "None")
+    PRIMARY_MODEL = next((m for m in preferred_models if m in mobilenet_models), next(iter(mobilenet_models.keys())) if mobilenet_models else "None")
     
     vis = img_rgb.copy()
     
@@ -265,7 +307,7 @@ def run_pipeline(image_pil: Image.Image,
         x1, y1, x2, y2 = item["bbox"]
         label, conf     = item["mob_preds"].get(
                               PRIMARY_MODEL,
-                              list(item["mob_preds"].values())[0]
+                              next(iter(item["mob_preds"].values()))
                           )
         display_label = CLASS_DISPLAY_NAMES.get(label, label)
         color_hex = CLASS_COLORS.get(label, "#2ecc71")
@@ -288,7 +330,7 @@ def run_pipeline(image_pil: Image.Image,
 
     # ── 4. BUILD RESULT TABLES (satu per MobileNetV2 version) ──
     model_summary_texts = {}
-    for model_name in mobilenet_models.keys():
+    for model_name in mobilenet_models:
         summary = build_summary_text(all_results, model_name, n_plants)
         model_summary_texts[model_name] = summary
 

@@ -16,29 +16,27 @@ if os.path.exists(PENV_PYTHON) and os.path.normpath(sys.executable).lower() != o
     sys.exit(subprocess.call([PENV_PYTHON] + sys.argv))
 
 import warnings
+
 warnings.filterwarnings("ignore")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+from collections import Counter
+from typing import Any
 
 import cv2
 import numpy as np
 from PIL import Image
-from collections import Counter
 
 # Path dasar
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 YOLO_WEIGHTS = os.path.join(BASE_DIR, "exp_pakcoy_yolo26_seg_v4", "weights", "best.pt")
 
-# DAFTAR MODEL KLASIFIKASI (Model Murni Baru di urutan pertama!)
+# DAFTAR MODEL KLASIFIKASI (3 Model MobileNetV2 Terbaik & Terbaru)
 MOBILENET_MODELS = {
     "Optimasi (Terbaru)": os.path.join(BASE_DIR, "mobilenetv2_pakcoy_opt.h5"),
-    "Murni (Terbaru)":  os.path.join(BASE_DIR, "mobilenetv2_pakcoy_murni.h5"),
-    "Augmented":        os.path.join(BASE_DIR, "mobilenetv2_pakcoy_augmented.h5"),
-    "V3 (Terbaru)":     os.path.join(BASE_DIR, "mobilenetv2_v3_terbaru.h5"),
-    "Top Pakcoy V3":    os.path.join(BASE_DIR, "model_top_pakcoy_v3.h5"),
-    "Top Pakcoy":       os.path.join(BASE_DIR, "model_top_pakcoy.h5"),
-    "V2 (Baru)":        os.path.join(BASE_DIR, "mobilenetv2_v2_baru.h5"),
-    "V1 (Lama)":        os.path.join(BASE_DIR, "mobilenetv2_v1_lama.h5"),
+    "Murni (Terbaru)":    os.path.join(BASE_DIR, "mobilenetv2_pakcoy_murni.h5"),
+    "Augmented":          os.path.join(BASE_DIR, "mobilenetv2_pakcoy_augmented.h5"),
 }
 
 CLASS_NAMES = ["etiolasi_berat", "etiolasi_ringan", "normal"]
@@ -78,15 +76,17 @@ print("="*65, flush=True)
 
 print("\n⏳ [1/2] Loading YOLO26n-Seg (Model Deteksi)...", flush=True)
 from ultralytics import YOLO
+
 yolo_model = YOLO(YOLO_WEIGHTS)
 print("   ✅ YOLO berhasil dimuat! Kelas YOLO:", yolo_model.names, flush=True)
 
 print("\n⏳ [2/2] Loading Model Klasifikasi MobileNetV2...", flush=True)
-import tensorflow as tf
+from tensorflow.keras.models import load_model
+
 mobilenet_models = {}
 for name, path in MOBILENET_MODELS.items():
     if os.path.exists(path):
-        mobilenet_models[name] = tf.keras.models.load_model(path, compile=False)
+        mobilenet_models[name] = load_model(path, compile=False)
         print(f"   ✅ Model {name:<18} loaded ({os.path.basename(path)})", flush=True)
     else:
         print(f"   ⚠️  Model {name:<18} NOT FOUND: {path}", flush=True)
@@ -126,7 +126,7 @@ def choose_file_dialog():
 
 def draw_detection_view(orig_img, tray_slots, model_name):
     vis = orig_img.copy()
-    h, w = vis.shape[:2]
+    _h, _w = vis.shape[:2]
 
     for idx, slot in enumerate(tray_slots):
         kx1, ky1, kx2, ky2 = slot["kotak_box"]
@@ -435,8 +435,9 @@ def process_image(img_path, conf_thresh=0.25, iou_thresh=0.45):
     print("🔍 Menjalankan deteksi objek dengan YOLO26n-Seg...", flush=True)
 
     # 1. YOLO Inference
-    results = yolo_model(orig_bgr, conf=conf_thresh, iou=iou_thresh, verbose=False)[0]
-    boxes = results.boxes
+    raw_res: Any = yolo_model(orig_bgr, conf=conf_thresh, iou=iou_thresh, verbose=False)
+    results: Any = raw_res[0] if isinstance(raw_res, (list, tuple)) else next(iter(raw_res))
+    boxes: Any = getattr(results, "boxes", None)
 
     if boxes is None or len(boxes) == 0:
         print("⚠️  Tidak ada objek yang terdeteksi oleh YOLO.", flush=True)
@@ -526,33 +527,99 @@ def process_image(img_path, conf_thresh=0.25, iou_thresh=0.45):
             for slot_item, p in zip(crop_slot_map, preds):
                 p_berat, p_ringan, p_normal = float(p[0]), float(p[1]), float(p[2])
                 
-                # Cek kepadatan kanopi daun hijau
-                crop_arr = slot_item.get("crop_bgr", None)
-                has_good_leaf = False
-                if crop_arr is not None:
-                    hsv_c = cv2.cvtColor(crop_arr, cv2.COLOR_BGR2HSV)
-                    mask_c = cv2.inRange(hsv_c, (25, 35, 35), (85, 255, 255))
-                    has_good_leaf = np.mean(mask_c > 0) >= 0.08
+                # ── ANALISIS FISIOLOGI TANAMAN ──
+                # 1. Analisis Ukuran & Proporsi (Menjulang Tinggi / Merebah)
+                b_box = slot_item.get("bibit_box")
+                k_box = slot_item.get("kotak_box")
+                is_menjulang = False
+                is_merebah = False
                 
-                # FOKUS DAUN KAMERA ATAS (TOP VIEW LEAF FOCUS):
-                # Pada kamera atas, bibit yang memiliki daun hijau segar mekar adalah NORMAL!
-                # Hanya dinyatakan etiolasi jika daunnya tidak berkembang & batangnya kurus rebah
-                if p_berat >= THRESH_ETIOLASI_BERAT and p_berat > p_normal and not has_good_leaf:
+                if b_box is not None:
+                    bw = max(1, b_box[2] - b_box[0])
+                    bh = max(1, b_box[3] - b_box[1])
+                    aspect = max(bw, bh) / max(1, min(bw, bh))
+                    
+                    if k_box is not None:
+                        kw = max(1, k_box[2] - k_box[0])
+                        kh = max(1, k_box[3] - k_box[1])
+                        # Merebah: melebar horizontal melintasi kotak ke samping
+                        if bw >= 1.05 * kw:
+                            is_merebah = True
+                        # Menjulang tinggi: vertikal melampaui lubang kotak
+                        elif bh >= 1.05 * kh:
+                            is_menjulang = True
+                    
+                    # Jika aspect ratio sangat lonjong (batang panjang meliuk)
+                    if aspect >= 1.50 and bh >= 50:
+                        is_menjulang = True
+                    elif aspect >= 1.50 and bw >= 45:
+                        is_merebah = True
+
+                # 2. Analisis Warna (Batang Hijau vs Putih Pucat Kutilang)
+                crop_arr = slot_item.get("crop_bgr", None)
+                green_ratio = 0.0
+                has_green = False
+                is_pale = False
+                if crop_arr is not None and crop_arr.size > 0:
+                    hsv_c = cv2.cvtColor(crop_arr, cv2.COLOR_BGR2HSV)
+                    green_mask = cv2.inRange(hsv_c, (25, 45, 45), (85, 255, 255))
+                    green_ratio = float(np.mean(green_mask > 0))
+                    has_green = green_ratio >= 0.10
+                    # Batang pucat/putih tanpa klorofil (Saturation rendah < 45, Value terang > 165)
+                    is_pale = float(np.mean(cv2.inRange(hsv_c, (0, 0, 165), (180, 45, 255)) > 0)) >= 0.08
+
+                # 3. KEPUTUSAN KELAS (FISIOLOGI PAKCOY):
+                # A. HIJAU DOMINAN (>= 35%) + TIDAK REBAH/MENJULANG → PASTI NORMAL
+                #    (Override model karena model opt.h5 bias berat untuk foto atas)
+                #    35% cukup karena crop sering masuk tanah hitam di sekitar tanaman
+                if green_ratio >= 0.35 and not is_merebah and not is_menjulang:
+                    lbl = "normal"
+                    conf = max(p_normal, 0.80)
+
+                # B. JIKA SUDAH MEREBAH -> ETIOLASI BERAT
+                elif is_merebah:
+                    lbl = "etiolasi_berat"
+                    conf = max(p_berat, 0.75)
+
+                # C. JIKA MENJULANG TINGGI -> ETIOLASI RINGAN (atau BERAT jika model yakin berat)
+                elif is_menjulang:
+                    if p_berat >= 0.50:
+                        lbl = "etiolasi_berat"
+                        conf = p_berat
+                    else:
+                        lbl = "etiolasi_ringan"
+                        conf = max(p_ringan, 0.70)
+
+                # D. JIKA BATANG PUTIH PUCAT (Kutilang kurang klorofil) -> ETIOLASI
+                elif is_pale and green_ratio < 0.30:
+                    lbl = "etiolasi_berat" if p_berat >= p_ringan else "etiolasi_ringan"
+                    conf = max(p_berat, p_ringan)
+
+                # E. HIJAU CUKUP (10-49%) + MODEL SETUJU NORMAL -> NORMAL
+                elif has_green and p_normal >= 0.20:
+                    lbl = "normal"
+                    conf = max(p_normal, 0.75)
+
+                # F. MODEL SANGAT YAKIN ETIOLASI DAN TIDAK TERLALU HIJAU -> ETIOLASI
+                elif p_berat >= 0.80 and green_ratio < 0.40:
                     lbl = "etiolasi_berat"
                     conf = p_berat
-                elif p_ringan >= THRESH_ETIOLASI_RINGAN and p_ringan > p_normal and not has_good_leaf:
+                elif p_ringan >= 0.80 and green_ratio < 0.40:
                     lbl = "etiolasi_ringan"
                     conf = p_ringan
+
+                # G. DEFAULT ARGMAX
                 else:
-                    lbl = "normal"
-                    conf = max(p_normal, 0.85) if has_good_leaf else p_normal
+                    max_idx = int(np.argmax([p_berat, p_ringan, p_normal]))
+                    lbl = CLASS_NAMES[max_idx]
+                    conf = float([p_berat, p_ringan, p_normal][max_idx])
 
                 slot_item["preds"][m_name] = (lbl, conf)
 
     # Untuk slot kosong
     for slot in tray_slots:
         if not slot["has_bibit"]:
-            for m_name in mobilenet_models.keys():
+            for m_name in mobilenet_models:
                 slot["preds"][m_name] = ("empty", 1.0)
 
     # 5. Tampilkan Rekapitulasi di Terminal
@@ -586,7 +653,7 @@ def process_image(img_path, conf_thresh=0.25, iou_thresh=0.45):
     print("="*95, flush=True)
 
     # 6. Sampel Detail 12 Slot Pertama
-    print(f"\n📋 Sampel Detail 12 Slot Tray Pertama:", flush=True)
+    print("\n📋 Sampel Detail 12 Slot Tray Pertama:", flush=True)
     sample_header = f"{'Slot':<6} | {'Status':<9}"
     for mk in m_keys[:3]:
         sample_header += f" | {mk[:15]:<15}"
@@ -601,7 +668,7 @@ def process_image(img_path, conf_thresh=0.25, iou_thresh=0.45):
                 lbl, conf = s["preds"].get(mk, ("?", 0))
                 row += f" | {lbl[:3]} {conf:.0%}"
             else:
-                row += f" | empty         "
+                row += " | empty         "
         print(row, flush=True)
 
     if len(tray_slots) > 12:

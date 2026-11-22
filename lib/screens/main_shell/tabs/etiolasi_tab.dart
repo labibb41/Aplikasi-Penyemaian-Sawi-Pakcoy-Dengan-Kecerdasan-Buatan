@@ -21,7 +21,7 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
   final ImagePicker _picker = ImagePicker();
 
   // Konfigurasi Server AI Laptop (Auto-Discovery)
-  String _serverIp = '192.168.1.100';
+  String _serverIp = kIsWeb ? 'localhost' : '192.168.100.9';
   final int _serverPort = 8000;
   String get _serverBaseUrl => 'http://$_serverIp:$_serverPort';
 
@@ -54,12 +54,26 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
 
     String? foundIp;
 
-    // Tahap 1: Cek IP tersimpan terlebih dahulu (Sangat Cepat ~200ms)
-    if (await _pingServer(_serverIp)) {
-      foundIp = _serverIp;
+    // Tahap 1: Cek kandidat langsung (Sangat cepat & akurat untuk Chrome Laptop maupun HP)
+    final directCandidates = <String>{
+      if (kIsWeb) ...[
+        if (Uri.base.host.isNotEmpty) Uri.base.host,
+        'localhost',
+        '127.0.0.1',
+      ],
+      _serverIp,
+      '192.168.100.9',
+      '192.168.1.100',
+    };
+
+    for (final testIp in directCandidates) {
+      if (await _pingServer(testIp)) {
+        foundIp = testIp;
+        break;
+      }
     }
 
-    // Tahap 2: Kirim Sinyal UDP Broadcast jika IP tersimpan belum merespons
+    // Tahap 2: Kirim Sinyal UDP Broadcast jika IP tersimpan belum merespons (Khusus HP / Android)
     if (foundIp == null && !kIsWeb) {
       foundIp = await _udpDiscover();
     }
@@ -99,7 +113,7 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
     try {
       final res = await http
           .get(Uri.parse('http://$ip:$_serverPort/api/health'))
-          .timeout(const Duration(milliseconds: 600));
+          .timeout(const Duration(milliseconds: 1200));
       return res.statusCode == 200;
     } catch (_) {
       return false;
@@ -408,6 +422,10 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final totalKotak = data['total_kotak'] ?? data['total_tanaman'] ?? 0;
+        final bijiDeteksi = data['biji_terdeteksi'] ?? data['total_tanaman'] ?? 0;
+        final kotakKosong = data['kotak_kosong'] ?? 0;
+        final dayaKecambah = data['daya_kecambah'] ?? 100.0;
 
         setState(() {
           _isAnalyzingTop = false;
@@ -417,8 +435,10 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
           _topResult = {
             'status': data['status_keseluruhan'] ?? 'Normal',
             'tipe_foto': data['framing_type'] ?? 'Fleksibel',
-            'total_bibit': '${data['total_tanaman']} Tanaman',
-            'bibit_normal': '${data['normal']} (${data['persentase_normal']}%)',
+            'total_kotak': '$totalKotak Lubang',
+            'biji_terdeteksi': '$bijiDeteksi Biji ($dayaKecambah%)',
+            'kotak_kosong': '$kotakKosong Lubang',
+            'bibit_normal': '${data['normal']} Bibit (${data['persentase_normal']}%)',
             'etiolasi_ringan': '${data['etiolasi_ringan']} Bibit',
             'etiolasi_berat': '${data['etiolasi_berat']} Bibit',
             'catatan': data['rekomendasi'] ?? '',
@@ -428,7 +448,7 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
         if (mounted) {
           showAppSnackBar(
             context,
-            'Analisis selesai: ${data['total_tanaman']} bibit diidentifikasi!',
+            'Analisis selesai: $bijiDeteksi bibit diidentifikasi dari $totalKotak kotak!',
           );
         }
       } else {
@@ -465,11 +485,238 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
     showAppSnackBar(context, 'Analisis Sisi Samping selesai!');
   }
 
+  void _openInteractiveZoomDialog({
+    required XFile imageFile,
+    String? annotatedBase64,
+    required bool isTop,
+  }) {
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        bool showAnnotatedInDialog = annotatedBase64 != null && annotatedBase64.isNotEmpty;
+        final TransformationController transformController = TransformationController();
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Widget currentImage;
+            if (showAnnotatedInDialog && annotatedBase64 != null) {
+              final base64Clean = annotatedBase64.replaceFirst(
+                RegExp(r'data:image\/[a-z]+;base64,'),
+                '',
+              );
+              final bytes = base64Decode(base64Clean);
+              currentImage = Image.memory(
+                bytes,
+                width: double.infinity,
+                height: double.infinity,
+                fit: BoxFit.contain,
+              );
+            } else {
+              if (kIsWeb) {
+                currentImage = Image.network(
+                  imageFile.path,
+                  width: double.infinity,
+                  height: double.infinity,
+                  fit: BoxFit.contain,
+                );
+              } else {
+                currentImage = Image.file(
+                  File(imageFile.path),
+                  width: double.infinity,
+                  height: double.infinity,
+                  fit: BoxFit.contain,
+                );
+              }
+            }
+
+            return Dialog.fullscreen(
+              backgroundColor: const Color(0xFF0F172A),
+              child: SafeArea(
+                child: Stack(
+                  children: [
+                    // Interactive Zoom & Pan Area
+                    Positioned.fill(
+                      child: InteractiveViewer(
+                        transformationController: transformController,
+                        minScale: 0.5,
+                        maxScale: 8.0,
+                        boundaryMargin: const EdgeInsets.all(120),
+                        child: Center(
+                          child: GestureDetector(
+                            onDoubleTap: () {
+                              if (transformController.value.getMaxScaleOnAxis() > 1.2) {
+                                transformController.value = Matrix4.identity();
+                              } else {
+                                transformController.value = Matrix4.identity()..scale(2.5);
+                              }
+                            },
+                            child: currentImage,
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    // Top Bar
+                    Positioned(
+                      top: 10,
+                      left: 12,
+                      right: 12,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.75),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.white24),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.zoom_in_rounded, color: Colors.white, size: 20),
+                                const SizedBox(width: 8),
+                                Text(
+                                  isTop ? 'Detail Hasil Sisi Atas' : 'Detail Sisi Samping',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            Row(
+                              children: [
+                                if (annotatedBase64 != null && annotatedBase64.isNotEmpty) ...[
+                                  InkWell(
+                                    onTap: () {
+                                      setDialogState(() {
+                                        showAnnotatedInDialog = !showAnnotatedInDialog;
+                                      });
+                                    },
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                      decoration: BoxDecoration(
+                                        color: showAnnotatedInDialog
+                                            ? AppColors.primary
+                                            : const Color(0xFF334155),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Text(
+                                        showAnnotatedInDialog ? 'Deteksi AI' : 'Foto Asli',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                ],
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  icon: const Icon(Icons.close_rounded, color: Colors.white, size: 22),
+                                  onPressed: () => Navigator.pop(ctx),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    // Bottom Floating Zoom Controls & Hint
+                    Positioned(
+                      bottom: 16,
+                      left: 20,
+                      right: 20,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.8),
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(color: Colors.white24),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  icon: const Icon(Icons.remove_circle_outline_rounded, color: Colors.white, size: 20),
+                                  tooltip: 'Zoom Out',
+                                  onPressed: () {
+                                    final current = transformController.value.getMaxScaleOnAxis();
+                                    final next = (current / 1.3).clamp(0.5, 8.0);
+                                    transformController.value = Matrix4.identity()..scale(next);
+                                  },
+                                ),
+                                const SizedBox(width: 4),
+                                InkWell(
+                                  onTap: () {
+                                    transformController.value = Matrix4.identity();
+                                  },
+                                  child: const Padding(
+                                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    child: Text(
+                                      'Reset (100%)',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  icon: const Icon(Icons.add_circle_outline_rounded, color: Colors.white, size: 20),
+                                  tooltip: 'Zoom In',
+                                  onPressed: () {
+                                    final current = transformController.value.getMaxScaleOnAxis();
+                                    final next = (current * 1.3).clamp(0.5, 8.0);
+                                    transformController.value = Matrix4.identity()..scale(next);
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.6),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: const Text(
+                              '💡 Cubit layar atau scroll mouse untuk zoom • Geser untuk menggeser',
+                              style: TextStyle(color: Colors.white70, fontSize: 10),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget _buildImagePreview({
     required XFile imageFile,
     String? annotatedBase64,
     required bool showAnnotated,
     required VoidCallback onToggleAnnotated,
+    required VoidCallback onZoomTap,
   }) {
     final hasAnnotated = annotatedBase64 != null && annotatedBase64.isNotEmpty;
 
@@ -480,7 +727,7 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
       imageWidget = Image.memory(
         bytes,
         width: double.infinity,
-        height: 240,
+        height: 320,
         fit: BoxFit.contain,
       );
     } else {
@@ -488,83 +735,162 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
         imageWidget = Image.network(
           imageFile.path,
           width: double.infinity,
-          height: 220,
-          fit: BoxFit.cover,
+          height: 320,
+          fit: BoxFit.contain,
         );
       } else {
         imageWidget = Image.file(
           File(imageFile.path),
           width: double.infinity,
-          height: 220,
-          fit: BoxFit.cover,
+          height: 320,
+          fit: BoxFit.contain,
         );
       }
     }
 
     return Container(
-      color: Colors.black87,
-      child: Stack(
-        children: [
-          imageWidget,
-          if (hasAnnotated)
+      height: 320,
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: const Color(0xFF0F172A),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // 1. Gambar Utama dengan Zoom Interaktif Langsung di Kartu
+            Positioned.fill(
+              child: InteractiveViewer(
+                clipBehavior: Clip.antiAlias,
+                minScale: 1.0,
+                maxScale: 6.0,
+                child: Center(child: imageWidget),
+              ),
+            ),
+
+            // 2. Tombol Layar Penuh (Zoom Maksimal) di Pojok Kanan Bawah
             Positioned(
               bottom: 8,
+              right: 8,
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: onZoomTap,
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.8),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white24, width: 0.8),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.fullscreen_rounded, size: 16, color: Colors.white),
+                        SizedBox(width: 4),
+                        Text(
+                          'Layar Penuh',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+            // 3. Hint Panduan Zoom di Pojok Kiri Atas
+            Positioned(
+              top: 8,
               left: 8,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.75),
-                  borderRadius: BorderRadius.circular(8),
+                  color: Colors.black.withValues(alpha: 0.65),
+                  borderRadius: BorderRadius.circular(6),
                 ),
-                child: Row(
+                child: const Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    InkWell(
-                      onTap: () {
-                        if (!showAnnotated) onToggleAnnotated();
-                      },
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: showAnnotated ? AppColors.primary : Colors.transparent,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: const Text(
-                          'Deteksi AI',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    InkWell(
-                      onTap: () {
-                        if (showAnnotated) onToggleAnnotated();
-                      },
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: !showAnnotated ? AppColors.primary : Colors.transparent,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: const Text(
-                          'Foto Asli',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
+                    Icon(Icons.pinch_rounded, size: 13, color: Colors.white70),
+                    SizedBox(width: 4),
+                    Text(
+                      'Cubit / Scroll untuk Zoom',
+                      style: TextStyle(color: Colors.white70, fontSize: 9.5),
                     ),
                   ],
                 ),
               ),
             ),
-        ],
+
+            // 4. Toggle Deteksi AI vs Foto Asli
+            if (hasAnnotated)
+              Positioned(
+                bottom: 8,
+                left: 8,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.8),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      InkWell(
+                        onTap: () {
+                          if (!showAnnotated) onToggleAnnotated();
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: showAnnotated ? AppColors.primary : Colors.transparent,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const Text(
+                            'Deteksi AI',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      InkWell(
+                        onTap: () {
+                          if (showAnnotated) onToggleAnnotated();
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: !showAnnotated ? AppColors.primary : Colors.transparent,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const Text(
+                            'Foto Asli',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -770,6 +1096,11 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                     annotatedBase64: annotatedBase64,
                     showAnnotated: showAnnotated,
                     onToggleAnnotated: onToggleAnnotated ?? () {},
+                    onZoomTap: () => _openInteractiveZoomDialog(
+                      imageFile: imageFile,
+                      annotatedBase64: annotatedBase64,
+                      isTop: title.contains('Atas'),
+                    ),
                   ),
                   Positioned(
                     top: 8,
@@ -903,9 +1234,112 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                       ],
                     ),
                     const Divider(height: 16, color: Color(0xFFDCFCE7)),
+                    if (result.containsKey('total_kotak')) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 9,
+                          horizontal: 8,
+                        ),
+                        margin: const EdgeInsets.only(bottom: 10),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFFDCFCE7)),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    'TOTAL KOTAK',
+                                    style: TextStyle(
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF0284C7),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    result['total_kotak'] ?? '-',
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w800,
+                                      color: Color(0xFF0F172A),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Container(
+                              width: 1,
+                              height: 26,
+                              color: const Color(0xFFE2E8F0),
+                            ),
+                            Expanded(
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    'BIJI TUMBUH',
+                                    style: TextStyle(
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF16A34A),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    result['biji_terdeteksi'] ?? '-',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      fontSize: 10.5,
+                                      fontWeight: FontWeight.w800,
+                                      color: Color(0xFF0F172A),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Container(
+                              width: 1,
+                              height: 26,
+                              color: const Color(0xFFE2E8F0),
+                            ),
+                            Expanded(
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    'KOTAK KOSONG',
+                                    style: TextStyle(
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF64748B),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    result['kotak_kosong'] ?? '-',
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w800,
+                                      color: Color(0xFF0F172A),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                     ...result.entries
                         .where(
-                          (e) => e.key != 'status' && e.key != 'catatan',
+                          (e) =>
+                              e.key != 'status' &&
+                              e.key != 'catatan' &&
+                              e.key != 'total_kotak' &&
+                              e.key != 'biji_terdeteksi' &&
+                              e.key != 'kotak_kosong',
                         )
                         .map(
                           (e) => Padding(

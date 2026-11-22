@@ -205,7 +205,7 @@ async def predict_top_view(file: UploadFile = File(...)):
         h, w = img_bgr.shape[:2]
 
         # ── 1. INFERENSI YOLO ──
-        yolo_results = yolo_model(img_bgr, conf=0.20, iou=0.45, verbose=False)[0]
+        yolo_results = yolo_model(img_bgr, conf=0.15, iou=0.45, verbose=False)[0]
         boxes = yolo_results.boxes
 
         detections = []
@@ -225,52 +225,112 @@ async def predict_top_view(file: UploadFile = File(...)):
         if detections and not bibit_dets:
             bibit_dets = detections
 
-        # Saring box bibit kanopi daun
+        # Saring box bibit kanopi daun (hilangkan duplikasi tumpang tindih)
         if bibit_dets:
             bibit_dets = select_best_leaf_boxes(img_bgr, bibit_dets)
 
-        # ── 2. FALLBACK FLEKSIBEL (JIKA FOTO CLOSE-UP / HANYA 1 BIBIT) ──
-        # Jika pengguna memotret 1 bibit dari dekat dan YOLO tidak memicu kotak tray
+        # ── 2. ANALISIS KOTAK TRAY & BIJI TERDETEKSI ──
+        vis_bgr = img_bgr.copy()
+        COLOR_KOTAK_ISI   = (255, 180, 0)    # Cyan / Biru Muda untuk slot terisi (sesuai referensi)
+        COLOR_KOTAK_EMPTY = (120, 120, 120)  # Abu-abu untuk slot kosong
+        COLOR_EMPTY_TXT   = (180, 180, 180)  # Abu-abu terang untuk teks EMPTY
+
+        is_tray = len(kotak_dets) >= 2
+        valid_bibit = []
         is_fallback_closeup = False
-        if not bibit_dets:
-            is_fallback_closeup = True
-            # Anggap gambar fokus pada bibit (area 80% tengah atau full image)
-            margin_x = int(w * 0.08)
-            margin_y = int(h * 0.08)
-            fx1, fy1 = margin_x, margin_y
-            fx2, fy2 = w - margin_x, h - margin_y
-            bibit_dets = [(fx1, fy1, fx2, fy2, 0.95, 0)]
+
+        if is_tray:
+            # Urutkan slot kisi tray dari atas ke bawah, kiri ke kanan
+            kotak_dets = sorted(kotak_dets, key=lambda b: (b[1] // 40, b[0]))
+            tray_slots = []
+            used_bibit = set()
+
+            for s_idx, k_box in enumerate(kotak_dets):
+                kx1, ky1, kx2, ky2 = k_box[:4]
+                found_bibit = None
+
+                for b_idx, b_box in enumerate(bibit_dets):
+                    if b_idx in used_bibit:
+                        continue
+                    bx1, by1, bx2, by2 = b_box[:4]
+                    bcx, bcy = (bx1 + bx2) / 2, (by1 + by2) / 2
+
+                    if kx1 <= bcx <= kx2 and ky1 <= bcy <= ky2:
+                        found_bibit = b_box
+                        used_bibit.add(b_idx)
+                        break
+
+                slot_info = {
+                    "slot_idx": s_idx + 1,
+                    "kotak_box": (kx1, ky1, kx2, ky2),
+                    "has_bibit": found_bibit is not None,
+                    "bibit_box": found_bibit
+                }
+                tray_slots.append(slot_info)
+
+                if found_bibit is not None:
+                    valid_bibit.append(found_bibit)
+                    # Gambar kotak kisi tray terisi (Cyan)
+                    cv2.rectangle(vis_bgr, (kx1, ky1), (kx2, ky2), COLOR_KOTAK_ISI, 1)
+                    cv2.putText(vis_bgr, f"#{s_idx + 1}", (kx1 + 2, ky1 + 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.28, COLOR_KOTAK_ISI, 1, cv2.LINE_AA)
+                else:
+                    # Gambar kotak kisi tray kosong (Abu-abu + Label EMPTY)
+                    cv2.rectangle(vis_bgr, (kx1, ky1), (kx2, ky2), COLOR_KOTAK_EMPTY, 1)
+                    cv2.putText(vis_bgr, f"#{s_idx + 1}", (kx1 + 2, ky1 + 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.28, COLOR_KOTAK_EMPTY, 1, cv2.LINE_AA)
+                    cx, cy = (kx1 + kx2) // 2, (ky1 + ky2) // 2
+                    cv2.putText(vis_bgr, "EMPTY", (cx - 16, cy + 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.30, COLOR_EMPTY_TXT, 1, cv2.LINE_AA)
+
+            # Tambahkan juga bibit di luar slot kisi tray jika ada
+            for b_idx, b_box in enumerate(bibit_dets):
+                if b_idx not in used_bibit:
+                    valid_bibit.append(b_box)
+
+            total_kotak = len(kotak_dets)
+            biji_terdeteksi = len(valid_bibit)
+            kotak_kosong = max(0, total_kotak - len(used_bibit))
+            daya_kecambah = round((len(used_bibit) / total_kotak * 100), 1) if total_kotak > 0 else 100.0
+        else:
+            # Fallback fleksibel jika memotret 1 bibit dekat (close-up) atau tanpa kisi tray
+            if not bibit_dets:
+                is_fallback_closeup = True
+                margin_x = int(w * 0.08)
+                margin_y = int(h * 0.08)
+                bibit_dets = [(margin_x, margin_y, w - margin_x, h - margin_y, 0.95, 0)]
+
+            valid_bibit = bibit_dets
+            total_kotak = len(valid_bibit)
+            biji_terdeteksi = len(valid_bibit)
+            kotak_kosong = 0
+            daya_kecambah = 100.0
 
         # ── 3. KLASIFIKASI DENGAN MOBILENETV2 (BATCH INFERENCE CEPAT) ──
         results = []
         counts = {"normal": 0, "etiolasi_ringan": 0, "etiolasi_berat": 0}
-        vis_bgr = img_bgr.copy()
 
-        # Gambar slot kisi tray jika ada (warna cyan)
-        for idx, (kx1, ky1, kx2, ky2, _, _) in enumerate(kotak_dets):
-            cv2.rectangle(vis_bgr, (kx1, ky1), (kx2, ky2), (255, 180, 0), 1)
-
-        valid_bibit = []
         batch_inputs = []
         crops_bgr = []
+        clean_valid_bibit = []
 
-        for b in bibit_dets:
+        for b in valid_bibit:
             x1, y1, x2, y2, yconf, _ = b
             crop = img_bgr[y1:y2, x1:x2]
-            if crop.size == 0:
+            if crop.size == 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
                 continue
             crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
             crop_pil = Image.fromarray(crop_rgb).resize(IMG_SIZE)
             arr = np.array(crop_pil, dtype=np.float32) / 255.0
             batch_inputs.append(arr)
-            valid_bibit.append(b)
+            clean_valid_bibit.append(b)
             crops_bgr.append(crop)
 
         if batch_inputs:
             X_tensor = tf.convert_to_tensor(np.stack(batch_inputs, axis=0), dtype=tf.float32)
             all_preds = mob_model(X_tensor, training=False).numpy()
 
-            for i, (b, crop, preds) in enumerate(zip(valid_bibit, crops_bgr, all_preds), 1):
+            for i, (b, crop, preds) in enumerate(zip(clean_valid_bibit, crops_bgr, all_preds), 1):
                 x1, y1, x2, y2, yconf, _ = b
                 p_berat, p_ringan, p_normal = float(preds[0]), float(preds[1]), float(preds[2])
 
@@ -320,13 +380,13 @@ async def predict_top_view(file: UploadFile = File(...)):
         # Ringkasan status keseluruhan & Rekomendasi Pintar SemaiKu
         if berat_cnt > 0:
             status_overall = "Etiolasi Berat Terdeteksi"
-            rekomendasi = f"Ditemukan {berat_cnt} bibit kutilang (etiolasi berat). Segera aktifkan Booster Lampu (Lampu 2) dan dekatkan jarak pencahayaan ke bibit."
+            rekomendasi = f"Ditemukan {berat_cnt} bibit kutilang (etiolasi berat) dari {biji_terdeteksi} bibit tumbuh. Segera aktifkan Booster Lampu (Lampu 2) dan dekatkan jarak pencahayaan ke bibit."
         elif ringan_cnt > 0:
             status_overall = "Etiolasi Ringan Terdeteksi"
             rekomendasi = f"Ditemukan {ringan_cnt} bibit mulai kekurangan cahaya. Disarankan menambah durasi masa terang Grow Light sebanyak 1-2 jam."
         else:
             status_overall = "Kondisi Sangat Baik (Normal)"
-            rekomendasi = "Semua bibit tumbuh optimal dan sehat. Pertahankan siklus terang/gelap serta suhu inkubator saat ini."
+            rekomendasi = f"Semua {biji_terdeteksi} bibit tumbuh optimal dan sehat ({pct_normal}% normal). Pertahankan siklus terang/gelap serta suhu inkubator saat ini."
 
         # Encode gambar hasil ke Base64 JPEG
         _, enc_jpg = cv2.imencode(".jpg", vis_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -334,8 +394,12 @@ async def predict_top_view(file: UploadFile = File(...)):
 
         return {
             "success": True,
-            "framing_type": "Close-Up / Parsial" if is_fallback_closeup or total <= 3 else "Multi-Bibit / Tray",
-            "total_tanaman": total,
+            "framing_type": "Close-Up / Parsial" if is_fallback_closeup or (not is_tray and total <= 3) else "Multi-Bibit / Tray",
+            "total_kotak": total_kotak,
+            "biji_terdeteksi": biji_terdeteksi,
+            "kotak_kosong": kotak_kosong,
+            "daya_kecambah": daya_kecambah,
+            "total_tanaman": biji_terdeteksi,
             "normal": normal_cnt,
             "etiolasi_ringan": ringan_cnt,
             "etiolasi_berat": berat_cnt,
