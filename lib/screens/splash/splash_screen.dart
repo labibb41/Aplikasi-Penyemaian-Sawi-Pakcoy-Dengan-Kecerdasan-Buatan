@@ -1,5 +1,6 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:ui';
+
 import 'package:flutter/material.dart';
 
 import '../../core/constants/app_colors.dart';
@@ -79,43 +80,8 @@ class _SplashScreenState extends State<SplashScreen>
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    // Top Badge
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(999),
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.18),
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 7,
-                            height: 7,
-                            decoration: const BoxDecoration(
-                              color: Color(0xFFBEF264),
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 7),
-                          const Text(
-                            'SMART GREENHOUSE SYSTEM',
-                            style: TextStyle(
-                              color: Color(0xFFD1FAE5),
-                              fontSize: 10.5,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 1.1,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                    // Top Spacer
+                    const SizedBox(height: 16),
 
                     // Center Brand Hero
                     Column(
@@ -198,7 +164,9 @@ class _SplashScreenState extends State<SplashScreen>
                               child: LinearProgressIndicator(
                                 value: _progressController.value,
                                 minHeight: 6,
-                                backgroundColor: Colors.white.withValues(alpha: 0.22),
+                                backgroundColor: Colors.white.withValues(
+                                  alpha: 0.22,
+                                ),
                                 valueColor: const AlwaysStoppedAnimation<Color>(
                                   Color(0xFFD9F99D),
                                 ),
@@ -217,7 +185,6 @@ class _SplashScreenState extends State<SplashScreen>
                         const SizedBox(height: 14),
                       ],
                     ),
-                    
 
                     // Bottom Partner Section: PENS & PT Petrokimia Gresik (Frosted Glass Pill)
                     Column(
@@ -233,7 +200,9 @@ class _SplashScreenState extends State<SplashScreen>
                               color: Colors.white.withValues(alpha: 0.35),
                             ),
                             Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 10),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                              ),
                               child: Text(
                                 'KOLABORASI & DUKUNGAN',
                                 style: TextStyle(
@@ -300,12 +269,16 @@ class _SplashScreenState extends State<SplashScreen>
                                   ),
                                   // Center Dot Separator
                                   Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                    ),
                                     child: Container(
                                       width: 4,
                                       height: 4,
                                       decoration: BoxDecoration(
-                                        color: Colors.white.withValues(alpha: 0.45),
+                                        color: Colors.white.withValues(
+                                          alpha: 0.45,
+                                        ),
                                         shape: BoxShape.circle,
                                       ),
                                     ),
@@ -356,7 +329,3 @@ class _SplashScreenState extends State<SplashScreen>
     );
   }
 }
-
-
-
-

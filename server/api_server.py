@@ -1,6 +1,4 @@
 import os
-import sys
-import io
 import base64
 import warnings
 warnings.filterwarnings("ignore")
@@ -11,10 +9,8 @@ import numpy as np
 import socket
 import threading
 from PIL import Image
-from collections import Counter
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 import tensorflow as tf
 from ultralytics import YOLO
 
@@ -52,6 +48,7 @@ start_discovery_beacon(http_port=8000, udp_port=8888)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 YOLO_WEIGHTS = os.path.join(BASE_DIR, "exp_pakcoy_yolo26_seg_v4", "weights", "best.pt")
+YOLO_SAMPING_WEIGHTS = os.path.join(BASE_DIR, "exp_pakcoy_samping_yolo26_seg_v1", "weights", "best.pt")
 
 MOBILENET_CANDIDATES = [
     os.path.join(BASE_DIR, "mobilenetv2_pakcoy_opt.h5"),
@@ -65,9 +62,17 @@ for cand in MOBILENET_CANDIDATES:
         MOB_WEIGHTS = cand
         break
 
-print("⏳ Memuat model YOLO...")
+print("⏳ Memuat model YOLO Pandangan Atas...")
 yolo_model = YOLO(YOLO_WEIGHTS)
-print("✅ YOLO Model Loaded!")
+print("✅ YOLO Atas Model Loaded!")
+
+yolo_samping_model = None
+if os.path.exists(YOLO_SAMPING_WEIGHTS):
+    print("⏳ Memuat model YOLO Pandangan Samping...")
+    yolo_samping_model = YOLO(YOLO_SAMPING_WEIGHTS)
+    print("✅ YOLO Samping Model Loaded!")
+else:
+    print(f"⚠️ Model Samping tidak ditemukan di: {YOLO_SAMPING_WEIGHTS}")
 
 print(f"⏳ Memuat MobileNetV2: {os.path.basename(MOB_WEIGHTS)}...")
 mob_model = tf.keras.models.load_model(MOB_WEIGHTS)
@@ -116,23 +121,91 @@ def preprocess_crop(crop_bgr: np.ndarray) -> np.ndarray:
     arr = np.array(crop_pil, dtype=np.float32) / 255.0
     return np.expand_dims(arr, axis=0)
 
-def predict_single_crop(crop_bgr: np.ndarray) -> tuple[str, float]:
-    """Prediksi satu potongan bibit dengan MobileNetV2 + HSV Green Check."""
+def classify_crop_physiological(crop_bgr: np.ndarray,
+                                 p_berat: float, p_ringan: float, p_normal: float,
+                                 bbox: tuple = None, kotak_box: tuple = None) -> tuple[str, float]:
+    """
+    Klasifikasi Fisiologis Tanaman Pakcoy:
+    - Hijau dominan (>=35%) + tidak rebah/menjulang -> NORMAL (override model bias)
+    - Batang rebah menyamping -> ETIOLASI BERAT
+    - Menjulang tinggi -> ETIOLASI (ringan/berat)
+    - Batang pucat/putih tanpa klorofil -> ETIOLASI
+    - Hijau cukup + model p_normal >= 0.20 -> NORMAL
+    """
+    # 1. Analisis Ukuran & Proporsi (Menjulang / Merebah)
+    is_menjulang = False
+    is_merebah = False
+    if bbox is not None:
+        bw = max(1, bbox[2] - bbox[0])
+        bh = max(1, bbox[3] - bbox[1])
+        aspect = max(bw, bh) / max(1, min(bw, bh))
+
+        if kotak_box is not None:
+            kw = max(1, kotak_box[2] - kotak_box[0])
+            kh = max(1, kotak_box[3] - kotak_box[1])
+            if bw >= 1.05 * kw:
+                is_merebah = True
+            elif bh >= 1.05 * kh:
+                is_menjulang = True
+
+        if aspect >= 1.50 and bh >= 50:
+            is_menjulang = True
+        elif aspect >= 1.50 and bw >= 45:
+            is_merebah = True
+
+    # 2. Analisis Warna (Batang Hijau vs Putih Pucat Kutilang)
+    green_ratio = 0.0
+    has_green = False
+    is_pale = False
+    if crop_bgr is not None and crop_bgr.size > 0:
+        hsv_c = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+        green_mask = cv2.inRange(hsv_c, (25, 45, 45), (85, 255, 255))
+        green_ratio = float(np.mean(green_mask > 0))
+        has_green = green_ratio >= 0.10
+        is_pale = float(np.mean(cv2.inRange(hsv_c, (0, 0, 165), (180, 45, 255)) > 0)) >= 0.08
+
+    # 3. KEPUTUSAN KELAS FISIOLOGIS
+    # A. HIJAU DOMINAN (>= 35%) + TIDAK REBAH/MENJULANG -> PASTI NORMAL
+    if green_ratio >= 0.35 and not is_merebah and not is_menjulang:
+        return "normal", max(p_normal, 0.80)
+
+    # B. JIKA SUDAH MEREBAH -> ETIOLASI BERAT
+    elif is_merebah:
+        return "etiolasi_berat", max(p_berat, 0.75)
+
+    # C. JIKA MENJULANG TINGGI -> ETIOLASI RINGAN / BERAT
+    elif is_menjulang:
+        if p_berat >= 0.50:
+            return "etiolasi_berat", p_berat
+        else:
+            return "etiolasi_ringan", max(p_ringan, 0.70)
+
+    # D. JIKA BATANG PUTIH PUCAT -> ETIOLASI
+    elif is_pale and green_ratio < 0.30:
+        lbl = "etiolasi_berat" if p_berat >= p_ringan else "etiolasi_ringan"
+        return lbl, max(p_berat, p_ringan)
+
+    # E. HIJAU CUKUP + MODEL SETUJU NORMAL -> NORMAL
+    elif has_green and p_normal >= 0.20:
+        return "normal", max(p_normal, 0.75)
+
+    # F. MODEL SANGAT YAKIN ETIOLASI DAN TIDAK TERLALU HIJAU -> ETIOLASI
+    elif p_berat >= 0.80 and green_ratio < 0.40:
+        return "etiolasi_berat", p_berat
+    elif p_ringan >= 0.80 and green_ratio < 0.40:
+        return "etiolasi_ringan", p_ringan
+
+    # G. DEFAULT ARGMAX
+    else:
+        max_idx = int(np.argmax([p_berat, p_ringan, p_normal]))
+        return CLASS_NAMES[max_idx], float([p_berat, p_ringan, p_normal][max_idx])
+
+def predict_single_crop(crop_bgr: np.ndarray, bbox: tuple = None, kotak_box: tuple = None) -> tuple[str, float]:
+    """Prediksi satu potongan bibit dengan MobileNetV2 + Fisiologi Tanaman."""
     x = preprocess_crop(crop_bgr)
     preds = mob_model.predict(x, verbose=0)[0]
     p_berat, p_ringan, p_normal = float(preds[0]), float(preds[1]), float(preds[2])
-
-    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, (25, 35, 35), (85, 255, 255))
-    has_good_leaf = np.mean(mask > 0) >= 0.08
-
-    if p_berat >= THRESH_ETIOLASI_BERAT and p_berat > p_normal and not has_good_leaf:
-        return "etiolasi_berat", p_berat
-    elif p_ringan >= THRESH_ETIOLASI_RINGAN and p_ringan > p_normal and not has_good_leaf:
-        return "etiolasi_ringan", p_ringan
-    else:
-        conf = max(p_normal, 0.88) if has_good_leaf else p_normal
-        return "normal", conf
+    return classify_crop_physiological(crop_bgr, p_berat, p_ringan, p_normal, bbox=bbox, kotak_box=kotak_box)
 
 def select_best_leaf_boxes(orig_bgr, bibit_boxes):
     """Filter kanopi daun agar tidak tumpang tindih."""
@@ -180,9 +253,11 @@ def health_check():
     return {
         "status": "online",
         "app": "SemaiKu AI Server",
-        "model_yolo": "exp_pakcoy_yolo26_seg_v4",
+        "model_yolo_top": "exp_pakcoy_yolo26_seg_v4",
+        "model_yolo_side": "exp_pakcoy_samping_yolo26_seg_v1" if yolo_samping_model else None,
         "model_mobilenet": os.path.basename(MOB_WEIGHTS) if MOB_WEIGHTS else None,
-        "mode": "flexible_framing (Full Tray, Partial, or Close-Up)"
+        "mode": "flexible_framing (Full Tray, Partial, or Close-Up)",
+        "supports": ["top_view", "side_view"]
     }
 
 @app.post("/api/predict/top")
@@ -334,16 +409,19 @@ async def predict_top_view(file: UploadFile = File(...)):
                 x1, y1, x2, y2, yconf, _ = b
                 p_berat, p_ringan, p_normal = float(preds[0]), float(preds[1]), float(preds[2])
 
-                hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-                mask = cv2.inRange(hsv, (25, 35, 35), (85, 255, 255))
-                has_good_leaf = np.mean(mask > 0) >= 0.08
+                # Cari kotak slot tray tempat bibit ini berada (jika ada)
+                matched_kotak = None
+                for k_box in kotak_dets:
+                    kx1, ky1, kx2, ky2 = k_box[:4]
+                    bcx, bcy = (x1 + x2) / 2, (y1 + y2) / 2
+                    if kx1 <= bcx <= kx2 and ky1 <= bcy <= ky2:
+                        matched_kotak = (kx1, ky1, kx2, ky2)
+                        break
 
-                if p_berat >= THRESH_ETIOLASI_BERAT and p_berat > p_normal and not has_good_leaf:
-                    label, conf = "etiolasi_berat", p_berat
-                elif p_ringan >= THRESH_ETIOLASI_RINGAN and p_ringan > p_normal and not has_good_leaf:
-                    label, conf = "etiolasi_ringan", p_ringan
-                else:
-                    label, conf = "normal", max(p_normal, 0.88) if has_good_leaf else p_normal
+                label, conf = classify_crop_physiological(
+                    crop, p_berat, p_ringan, p_normal,
+                    bbox=(x1, y1, x2, y2), kotak_box=matched_kotak
+                )
 
                 counts[label] += 1
                 disp_label = CLASS_DISPLAY.get(label, label)
@@ -408,6 +486,187 @@ async def predict_top_view(file: UploadFile = File(...)):
             "rekomendasi": rekomendasi,
             "annotated_image": annotated_b64,
             "detail_tanaman": results
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/predict/side")
+@app.post("/api/predict/samping")
+async def predict_side_view(file: UploadFile = File(...), tray_width_cm: float = 66.0):
+    """
+    Endpoint deteksi & pengukuran tinggi etiolasi bibit pakcoy dari Sisi Samping.
+    - YOLO26n-Seg untuk deteksi batang tanaman & batas bawah tray
+    - Pengukuran tinggi dalam centimeter (cm) secara presisi
+    - Analisis warna pangkal batang (ruang warna HSV)
+    """
+    if yolo_samping_model is None:
+        raise HTTPException(status_code=503, detail="Model sisi samping belum tersedia di server")
+
+    try:
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img_bgr is None:
+            raise HTTPException(status_code=400, detail="Format gambar tidak valid")
+
+        h_img, w_img = img_bgr.shape[:2]
+
+        # Inferensi YOLO Samping
+        results_yolo = yolo_samping_model(img_bgr, conf=0.25, imgsz=640, verbose=False)[0]
+        boxes = results_yolo.boxes
+        masks = results_yolo.masks
+
+        tanaman_list = []
+        tray_box = None
+
+        if boxes is not None and len(boxes) > 0:
+            for i, box in enumerate(boxes):
+                cls_id = int(box.cls[0])
+                cls_name = yolo_samping_model.names.get(cls_id, "")
+                conf = float(box.conf[0])
+                xyxy = box.xyxy[0].cpu().numpy()
+                mask_poly = masks.xy[i] if masks is not None else None
+
+                if "tray" in cls_name.lower():
+                    tray_box = xyxy
+                elif "batang" in cls_name.lower():
+                    tanaman_list.append({
+                        "box": xyxy,
+                        "conf": conf,
+                        "poly": mask_poly
+                    })
+
+        if tray_box is not None:
+            tx1, ty1, tx2, ty2 = tray_box
+            tray_w_px = max(1.0, tx2 - tx1)
+            scale_cm_per_px = tray_width_cm / tray_w_px
+            baseline_y = ty1
+        else:
+            scale_cm_per_px = 0.05
+            baseline_y = max([t["box"][3] for t in tanaman_list]) if tanaman_list else h_img - 20
+
+        vis_bgr = img_bgr.copy()
+
+        # Gambar garis acuan tray
+        if tray_box is not None:
+            cv2.rectangle(vis_bgr, (int(tray_box[0]), int(tray_box[1])), (int(tray_box[2]), int(tray_box[3])), (255, 200, 0), 2)
+            cv2.putText(vis_bgr, "BATAS TRAY (0 cm)", (int(tray_box[0]) + 5, int(tray_box[1]) - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 2)
+
+        tanaman_list = sorted(tanaman_list, key=lambda t: t["box"][0])
+        results_detail = []
+        counts = {"normal": 0, "etiolasi_ringan": 0, "etiolasi_berat": 0}
+        all_heights = []
+
+        for idx, t in enumerate(tanaman_list, 1):
+            x1, y1, x2, y2 = map(int, t["box"])
+            poly = t["poly"]
+
+            pucuk_y = int(np.min(poly[:, 1])) if poly is not None and len(poly) > 0 else y1
+            pangkal_y = int(baseline_y) if baseline_y > pucuk_y else y2
+
+            tinggi_px = max(1, pangkal_y - pucuk_y)
+            tinggi_cm = round(float(tinggi_px * scale_cm_per_px), 2)
+            all_heights.append(tinggi_cm)
+
+            # Analisis Warna Batang (40% bawah)
+            stem_y_start = int(pucuk_y + 0.60 * tinggi_px)
+            stem_y_end = min(h_img, pangkal_y)
+            stem_crop = img_bgr[stem_y_start:stem_y_end, max(0, x1):min(w_img, x2)]
+
+            is_pale = False
+            color_desc = "Hijau"
+            if stem_crop.size > 0:
+                hsv = cv2.cvtColor(stem_crop, cv2.COLOR_BGR2HSV)
+                pale_mask = cv2.inRange(hsv, (0, 0, 150), (180, 55, 255))
+                green_mask = cv2.inRange(hsv, (25, 40, 40), (85, 255, 255))
+                pale_ratio = float(np.mean(pale_mask > 0))
+                green_ratio = float(np.mean(green_mask > 0))
+
+                if pale_ratio >= 0.25 and green_ratio < 0.20:
+                    is_pale = True
+                    color_desc = f"Pucat ({pale_ratio:.0%})"
+                else:
+                    color_desc = f"Hijau ({green_ratio:.0%})"
+
+            if tinggi_cm <= 7.0:
+                status = "Normal"
+                color_bgr = (0, 220, 0)
+                counts["normal"] += 1
+            elif is_pale:
+                status = "Etiolasi Berat"
+                color_bgr = (0, 0, 230)
+                counts["etiolasi_berat"] += 1
+            else:
+                status = "Etiolasi Ringan"
+                color_bgr = (0, 165, 255)
+                counts["etiolasi_ringan"] += 1
+
+            # Gambar Kotak Bounding Box
+            cv2.rectangle(vis_bgr, (x1, y1), (x2, y2), color_bgr, 2)
+
+            # Garis ukur tinggi
+            cx = int((x1 + x2) / 2)
+            cv2.line(vis_bgr, (cx, pangkal_y), (cx, pucuk_y), (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.circle(vis_bgr, (cx, pucuk_y), 3, (0, 255, 255), -1)
+
+            # Badge Label di atas kotak
+            label_txt = f"{status} {tinggi_cm:.1f}cm"
+            (tw, th), _ = cv2.getTextSize(label_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            badge_top = max(0, y1 - th - 6)
+            cv2.rectangle(vis_bgr, (x1, badge_top), (x1 + tw + 6, y1), color_bgr, -1)
+            text_color = (0, 0, 0) if status == "Etiolasi Ringan" else (255, 255, 255)
+            cv2.putText(vis_bgr, label_txt, (x1 + 3, y1 - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.45, text_color, 1, cv2.LINE_AA)
+
+            results_detail.append({
+                "id": idx,
+                "status": status,
+                "tinggi_cm": tinggi_cm,
+                "tinggi_px": tinggi_px,
+                "warna_batang": color_desc,
+                "bbox": [x1, y1, x2, y2]
+            })
+
+        total_tanaman = len(results_detail)
+        avg_height = round(float(np.mean(all_heights)), 1) if all_heights else 0.0
+        normal_cnt = counts["normal"]
+        ringan_cnt = counts["etiolasi_ringan"]
+        berat_cnt = counts["etiolasi_berat"]
+
+        pct_normal = round((normal_cnt / total_tanaman * 100), 1) if total_tanaman > 0 else 0.0
+        pct_etiolasi = round(100.0 - pct_normal, 1)
+
+        if berat_cnt > 0:
+            status_overall = "Etiolasi Berat Terdeteksi (Kutilang)"
+            rekomendasi = f"Ditemukan {berat_cnt} batang meninggi pucat (>7 cm). Batang rapuh, segera turunkan intensitas jarak lampu dan berikan sirkulasi udara."
+        elif ringan_cnt > 0:
+            status_overall = "Etiolasi Ringan Terdeteksi"
+            rekomendasi = f"Ditemukan {ringan_cnt} batang mulai meninggi (>7 cm) namun masih hijau. Tambahkan durasi penyinaran 1-2 jam."
+        else:
+            status_overall = "Batang Kokoh (Normal)"
+            rekomendasi = f"Semua {total_tanaman} batang tanaman tumbuh proporsional (rata-rata {avg_height} cm). Kondisi pencahayaan saat ini sangat tepat."
+
+        _, enc_jpg = cv2.imencode(".jpg", vis_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        annotated_b64 = "data:image/jpeg;base64," + base64.b64encode(enc_jpg.tobytes()).decode("ascii")
+
+        return {
+            "success": True,
+            "total_tanaman": total_tanaman,
+            "biji_terdeteksi": total_tanaman,
+            "tinggi_rata_rata": avg_height,
+            "normal": normal_cnt,
+            "etiolasi_ringan": ringan_cnt,
+            "etiolasi_berat": berat_cnt,
+            "persentase_normal": pct_normal,
+            "persentase_etiolasi": pct_etiolasi,
+            "status_keseluruhan": status_overall,
+            "rekomendasi": rekomendasi,
+            "annotated_image": annotated_b64,
+            "detail_tanaman": results_detail
         }
 
     except Exception as e:

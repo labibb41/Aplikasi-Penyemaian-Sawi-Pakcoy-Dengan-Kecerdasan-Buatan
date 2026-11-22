@@ -39,6 +39,8 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
   XFile? _sideImage;
   bool _isAnalyzingSide = false;
   Map<String, String>? _sideResult;
+  String? _sideAnnotatedImageBase64;
+  bool _showSideAnnotated = true;
 
   @override
   void initState() {
@@ -92,7 +94,10 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
         _isDiscoveringServer = false;
       });
       if (showFeedback && mounted) {
-        showAppSnackBar(context, '✅ Server AI terdeteksi otomatis: $_serverBaseUrl');
+        showAppSnackBar(
+          context,
+          '✅ Server AI terdeteksi otomatis: $_serverBaseUrl',
+        );
       }
     } else {
       setState(() {
@@ -179,7 +184,22 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
 
           // Targetkan gateway dan host terdekat di sekitar HP
           final targetHosts = <int>{};
-          targetHosts.addAll([1, 2, 3, 4, 5, 10, 15, 20, 50, 100, 101, 102, 103, 104]);
+          targetHosts.addAll([
+            1,
+            2,
+            3,
+            4,
+            5,
+            10,
+            15,
+            20,
+            50,
+            100,
+            101,
+            102,
+            103,
+            104,
+          ]);
           for (int i = myHost - 6; i <= myHost + 6; i++) {
             if (i > 0 && i < 255) targetHosts.add(i);
           }
@@ -288,7 +308,10 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                     _autoDiscoverServer(showFeedback: true);
                   },
                   icon: const Icon(Icons.radar_rounded, size: 16),
-                  label: const Text('Pindai Ulang', style: TextStyle(fontSize: 11)),
+                  label: const Text(
+                    'Pindai Ulang',
+                    style: TextStyle(fontSize: 11),
+                  ),
                 ),
               ],
             ),
@@ -356,7 +379,11 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
               '1. Buka folder server di laptop, lalu klik 2x "jalankan_server.bat".\n'
               '2. Pastikan HP dan laptop terhubung ke jaringan Wi-Fi yang sama.\n'
               '3. Tekan tombol "Cari Otomatis" di bawah ini.',
-              style: TextStyle(fontSize: 11.5, color: AppColors.textSecondary, height: 1.45),
+              style: TextStyle(
+                fontSize: 11.5,
+                color: AppColors.textSecondary,
+                height: 1.45,
+              ),
             ),
           ],
         ),
@@ -411,7 +438,9 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
         http.MultipartFile.fromBytes(
           'file',
           bytes,
-          filename: _topImage!.name.isNotEmpty ? _topImage!.name : 'top_view.jpg',
+          filename: _topImage!.name.isNotEmpty
+              ? _topImage!.name
+              : 'top_view.jpg',
         ),
       );
 
@@ -423,7 +452,8 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         final totalKotak = data['total_kotak'] ?? data['total_tanaman'] ?? 0;
-        final bijiDeteksi = data['biji_terdeteksi'] ?? data['total_tanaman'] ?? 0;
+        final bijiDeteksi =
+            data['biji_terdeteksi'] ?? data['total_tanaman'] ?? 0;
         final kotakKosong = data['kotak_kosong'] ?? 0;
         final dayaKecambah = data['daya_kecambah'] ?? 100.0;
 
@@ -438,7 +468,8 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
             'total_kotak': '$totalKotak Lubang',
             'biji_terdeteksi': '$bijiDeteksi Biji ($dayaKecambah%)',
             'kotak_kosong': '$kotakKosong Lubang',
-            'bibit_normal': '${data['normal']} Bibit (${data['persentase_normal']}%)',
+            'bibit_normal':
+                '${data['normal']} Bibit (${data['persentase_normal']}%)',
             'etiolasi_ringan': '${data['etiolasi_ringan']} Bibit',
             'etiolasi_berat': '${data['etiolasi_berat']} Bibit',
             'catatan': data['rekomendasi'] ?? '',
@@ -466,23 +497,84 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
 
   Future<void> _analyzeSide() async {
     if (_sideImage == null) return;
-    setState(() => _isAnalyzingSide = true);
 
-    await Future.delayed(const Duration(milliseconds: 1100));
-    if (!mounted) return;
+    if (!_isServerOnline) {
+      await _autoDiscoverServer();
+      if (!_isServerOnline) {
+        _showConnectionErrorDialog();
+        return;
+      }
+    }
 
     setState(() {
-      _isAnalyzingSide = false;
-      _sideResult = {
-        'status': 'Batang Kokoh (Normal)',
-        'tinggi': '3.2 cm (Proporsional)',
-        'etiolasi': 'Negatif (0%)',
-        'catatan':
-            'Tinggi hipokotil seimbang dengan luas daun, batang tegak kuat, pencahayaan utama mencukupi.',
-      };
+      _isAnalyzingSide = true;
+      _sideResult = null;
+      _sideAnnotatedImageBase64 = null;
     });
 
-    showAppSnackBar(context, 'Analisis Sisi Samping selesai!');
+    try {
+      final uri = Uri.parse('$_serverBaseUrl/api/predict/side');
+      final request = http.MultipartRequest('POST', uri);
+
+      final bytes = await _sideImage!.readAsBytes();
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'file',
+          bytes,
+          filename: _sideImage!.name.isNotEmpty
+              ? _sideImage!.name
+              : 'side_view.jpg',
+        ),
+      );
+
+      final streamedResponse = await request.send().timeout(
+        const Duration(seconds: 35),
+      );
+      final response = await http.Response.fromStream(streamedResponse);
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final totalTanaman =
+            data['total_tanaman'] ?? data['biji_terdeteksi'] ?? 0;
+        final avgHeight = data['tinggi_rata_rata'] ?? 0.0;
+        final normalCnt = data['normal'] ?? 0;
+        final ringanCnt = data['etiolasi_ringan'] ?? 0;
+        final beratCnt = data['etiolasi_berat'] ?? 0;
+        final pctNormal = data['persentase_normal'] ?? 0.0;
+
+        setState(() {
+          _isAnalyzingSide = false;
+          _isServerOnline = true;
+          _sideAnnotatedImageBase64 = data['annotated_image'] as String?;
+          _showSideAnnotated = true;
+          _sideResult = {
+            'status': data['status_keseluruhan'] ?? 'Normal',
+            'biji_terdeteksi': '$totalTanaman Biji',
+            'bibit_normal': '$normalCnt Biji ($pctNormal%)',
+            'tinggi_rata_rata': '$avgHeight cm',
+            'etiolasi_ringan': '$ringanCnt Biji',
+            'etiolasi_berat': '$beratCnt Biji',
+            'catatan': data['rekomendasi'] ?? '',
+          };
+        });
+
+        if (mounted) {
+          showAppSnackBar(
+            context,
+            'Analisis Samping selesai: $totalTanaman biji terdeteksi!',
+          );
+        }
+      } else {
+        throw Exception('Server error: HTTP ${response.statusCode}');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isAnalyzingSide = false;
+        _isServerOnline = false;
+      });
+      _showConnectionErrorDialog();
+    }
   }
 
   void _openInteractiveZoomDialog({
@@ -493,8 +585,10 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
     showDialog(
       context: context,
       builder: (ctx) {
-        bool showAnnotatedInDialog = annotatedBase64 != null && annotatedBase64.isNotEmpty;
-        final TransformationController transformController = TransformationController();
+        bool showAnnotatedInDialog =
+            annotatedBase64 != null && annotatedBase64.isNotEmpty;
+        final TransformationController transformController =
+            TransformationController();
 
         return StatefulBuilder(
           builder: (context, setDialogState) {
@@ -544,10 +638,13 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                         child: Center(
                           child: GestureDetector(
                             onDoubleTap: () {
-                              if (transformController.value.getMaxScaleOnAxis() > 1.2) {
+                              if (transformController.value
+                                      .getMaxScaleOnAxis() >
+                                  1.2) {
                                 transformController.value = Matrix4.identity();
                               } else {
-                                transformController.value = Matrix4.identity()..scale(2.5);
+                                transformController.value = Matrix4.identity()
+                                  ..scale(2.5);
                               }
                             },
                             child: currentImage,
@@ -562,7 +659,10 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                       left: 12,
                       right: 12,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
                         decoration: BoxDecoration(
                           color: Colors.black.withValues(alpha: 0.75),
                           borderRadius: BorderRadius.circular(14),
@@ -573,10 +673,16 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                           children: [
                             Row(
                               children: [
-                                const Icon(Icons.zoom_in_rounded, color: Colors.white, size: 20),
+                                const Icon(
+                                  Icons.zoom_in_rounded,
+                                  color: Colors.white,
+                                  size: 20,
+                                ),
                                 const SizedBox(width: 8),
                                 Text(
-                                  isTop ? 'Detail Hasil Sisi Atas' : 'Detail Sisi Samping',
+                                  isTop
+                                      ? 'Detail Hasil Sisi Atas'
+                                      : 'Detail Sisi Samping',
                                   style: const TextStyle(
                                     color: Colors.white,
                                     fontSize: 13,
@@ -587,16 +693,21 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                             ),
                             Row(
                               children: [
-                                if (annotatedBase64 != null && annotatedBase64.isNotEmpty) ...[
+                                if (annotatedBase64 != null &&
+                                    annotatedBase64.isNotEmpty) ...[
                                   InkWell(
                                     onTap: () {
                                       setDialogState(() {
-                                        showAnnotatedInDialog = !showAnnotatedInDialog;
+                                        showAnnotatedInDialog =
+                                            !showAnnotatedInDialog;
                                       });
                                     },
                                     borderRadius: BorderRadius.circular(8),
                                     child: Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 5,
+                                      ),
                                       decoration: BoxDecoration(
                                         color: showAnnotatedInDialog
                                             ? AppColors.primary
@@ -604,7 +715,9 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                                         borderRadius: BorderRadius.circular(8),
                                       ),
                                       child: Text(
-                                        showAnnotatedInDialog ? 'Deteksi AI' : 'Foto Asli',
+                                        showAnnotatedInDialog
+                                            ? 'Deteksi AI'
+                                            : 'Foto Asli',
                                         style: const TextStyle(
                                           color: Colors.white,
                                           fontSize: 11,
@@ -617,7 +730,11 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                                 ],
                                 IconButton(
                                   visualDensity: VisualDensity.compact,
-                                  icon: const Icon(Icons.close_rounded, color: Colors.white, size: 22),
+                                  icon: const Icon(
+                                    Icons.close_rounded,
+                                    color: Colors.white,
+                                    size: 22,
+                                  ),
                                   onPressed: () => Navigator.pop(ctx),
                                 ),
                               ],
@@ -636,7 +753,10 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 6,
+                            ),
                             decoration: BoxDecoration(
                               color: Colors.black.withValues(alpha: 0.8),
                               borderRadius: BorderRadius.circular(999),
@@ -647,21 +767,34 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                               children: [
                                 IconButton(
                                   visualDensity: VisualDensity.compact,
-                                  icon: const Icon(Icons.remove_circle_outline_rounded, color: Colors.white, size: 20),
+                                  icon: const Icon(
+                                    Icons.remove_circle_outline_rounded,
+                                    color: Colors.white,
+                                    size: 20,
+                                  ),
                                   tooltip: 'Zoom Out',
                                   onPressed: () {
-                                    final current = transformController.value.getMaxScaleOnAxis();
-                                    final next = (current / 1.3).clamp(0.5, 8.0);
-                                    transformController.value = Matrix4.identity()..scale(next);
+                                    final current = transformController.value
+                                        .getMaxScaleOnAxis();
+                                    final next = (current / 1.3).clamp(
+                                      0.5,
+                                      8.0,
+                                    );
+                                    transformController.value =
+                                        Matrix4.identity()..scale(next);
                                   },
                                 ),
                                 const SizedBox(width: 4),
                                 InkWell(
                                   onTap: () {
-                                    transformController.value = Matrix4.identity();
+                                    transformController.value =
+                                        Matrix4.identity();
                                   },
                                   child: const Padding(
-                                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 4,
+                                    ),
                                     child: Text(
                                       'Reset (100%)',
                                       style: TextStyle(
@@ -675,12 +808,21 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                                 const SizedBox(width: 4),
                                 IconButton(
                                   visualDensity: VisualDensity.compact,
-                                  icon: const Icon(Icons.add_circle_outline_rounded, color: Colors.white, size: 20),
+                                  icon: const Icon(
+                                    Icons.add_circle_outline_rounded,
+                                    color: Colors.white,
+                                    size: 20,
+                                  ),
                                   tooltip: 'Zoom In',
                                   onPressed: () {
-                                    final current = transformController.value.getMaxScaleOnAxis();
-                                    final next = (current * 1.3).clamp(0.5, 8.0);
-                                    transformController.value = Matrix4.identity()..scale(next);
+                                    final current = transformController.value
+                                        .getMaxScaleOnAxis();
+                                    final next = (current * 1.3).clamp(
+                                      0.5,
+                                      8.0,
+                                    );
+                                    transformController.value =
+                                        Matrix4.identity()..scale(next);
                                   },
                                 ),
                               ],
@@ -688,14 +830,13 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                           ),
                           const SizedBox(height: 6),
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 3,
+                            ),
                             decoration: BoxDecoration(
                               color: Colors.black.withValues(alpha: 0.6),
                               borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: const Text(
-                              '💡 Cubit layar atau scroll mouse untuk zoom • Geser untuk menggeser',
-                              style: TextStyle(color: Colors.white70, fontSize: 10),
                             ),
                           ),
                         ],
@@ -722,7 +863,10 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
 
     Widget imageWidget;
     if (hasAnnotated && showAnnotated) {
-      final base64Clean = annotatedBase64.replaceFirst(RegExp(r'data:image\/[a-z]+;base64,'), '');
+      final base64Clean = annotatedBase64.replaceFirst(
+        RegExp(r'data:image\/[a-z]+;base64,'),
+        '',
+      );
       final bytes = base64Decode(base64Clean);
       imageWidget = Image.memory(
         bytes,
@@ -780,7 +924,10 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                   onTap: onZoomTap,
                   borderRadius: BorderRadius.circular(8),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 5,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.black.withValues(alpha: 0.8),
                       borderRadius: BorderRadius.circular(8),
@@ -789,7 +936,11 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                     child: const Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.fullscreen_rounded, size: 16, color: Colors.white),
+                        Icon(
+                          Icons.fullscreen_rounded,
+                          size: 16,
+                          color: Colors.white,
+                        ),
                         SizedBox(width: 4),
                         Text(
                           'Layar Penuh',
@@ -806,37 +957,16 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
               ),
             ),
 
-            // 3. Hint Panduan Zoom di Pojok Kiri Atas
-            Positioned(
-              top: 8,
-              left: 8,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.65),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.pinch_rounded, size: 13, color: Colors.white70),
-                    SizedBox(width: 4),
-                    Text(
-                      'Cubit / Scroll untuk Zoom',
-                      style: TextStyle(color: Colors.white70, fontSize: 9.5),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            // 4. Toggle Deteksi AI vs Foto Asli
+            // Toggle Deteksi AI vs Foto Asli
             if (hasAnnotated)
               Positioned(
                 bottom: 8,
                 left: 8,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 4,
+                    vertical: 3,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.black.withValues(alpha: 0.8),
                     borderRadius: BorderRadius.circular(8),
@@ -849,9 +979,14 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                           if (!showAnnotated) onToggleAnnotated();
                         },
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
                           decoration: BoxDecoration(
-                            color: showAnnotated ? AppColors.primary : Colors.transparent,
+                            color: showAnnotated
+                                ? AppColors.primary
+                                : Colors.transparent,
                             borderRadius: BorderRadius.circular(6),
                           ),
                           child: const Text(
@@ -870,9 +1005,14 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                           if (showAnnotated) onToggleAnnotated();
                         },
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
                           decoration: BoxDecoration(
-                            color: !showAnnotated ? AppColors.primary : Colors.transparent,
+                            color: !showAnnotated
+                                ? AppColors.primary
+                                : Colors.transparent,
                             borderRadius: BorderRadius.circular(6),
                           ),
                           child: const Text(
@@ -1041,10 +1181,7 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                               borderRadius: BorderRadius.circular(11),
                             ),
                           ),
-                          icon: const Icon(
-                            Icons.camera_alt_rounded,
-                            size: 16,
-                          ),
+                          icon: const Icon(Icons.camera_alt_rounded, size: 16),
                           label: const Text(
                             'Kamera HP',
                             style: TextStyle(
@@ -1331,6 +1468,104 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                           ],
                         ),
                       ),
+                    ] else if (result.containsKey('biji_terdeteksi')) ...[
+                      // Banner 3 Kolom Sisi Samping (Langsung Biji tanpa Kotak)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 9,
+                          horizontal: 8,
+                        ),
+                        margin: const EdgeInsets.only(bottom: 10),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFFDCFCE7)),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    'BIJI TERDETEKSI',
+                                    style: TextStyle(
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF0284C7),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    result['biji_terdeteksi'] ?? '-',
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w800,
+                                      color: Color(0xFF0F172A),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Container(
+                              width: 1,
+                              height: 26,
+                              color: const Color(0xFFE2E8F0),
+                            ),
+                            Expanded(
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    'BIBIT NORMAL',
+                                    style: TextStyle(
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF16A34A),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    result['bibit_normal'] ?? '-',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      fontSize: 10.5,
+                                      fontWeight: FontWeight.w800,
+                                      color: Color(0xFF0F172A),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Container(
+                              width: 1,
+                              height: 26,
+                              color: const Color(0xFFE2E8F0),
+                            ),
+                            Expanded(
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    'TINGGI RERATA',
+                                    style: TextStyle(
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFFD97706),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    result['tinggi_rata_rata'] ?? '-',
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w800,
+                                      color: Color(0xFF0F172A),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ],
                     ...result.entries
                         .where(
@@ -1339,7 +1574,10 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                               e.key != 'catatan' &&
                               e.key != 'total_kotak' &&
                               e.key != 'biji_terdeteksi' &&
-                              e.key != 'kotak_kosong',
+                              e.key != 'kotak_kosong' &&
+                              (result.containsKey('total_kotak') ||
+                                  (e.key != 'bibit_normal' &&
+                                      e.key != 'tinggi_rata_rata')),
                         )
                         .map(
                           (e) => Padding(
@@ -1367,7 +1605,8 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                             ),
                           ),
                         ),
-                    if (result['catatan'] != null && result['catatan']!.isNotEmpty) ...[
+                    if (result['catatan'] != null &&
+                        result['catatan']!.isNotEmpty) ...[
                       const SizedBox(height: 6),
                       Container(
                         padding: const EdgeInsets.all(8),
@@ -1524,20 +1763,23 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                 onTap: _showServerConfigDialog,
                 borderRadius: BorderRadius.circular(12),
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
                   decoration: BoxDecoration(
                     color: _isServerOnline
                         ? const Color(0xFFF0FDF4)
                         : _isDiscoveringServer
-                            ? const Color(0xFFFEFCE8)
-                            : const Color(0xFFFEF2F2),
+                        ? const Color(0xFFFEFCE8)
+                        : const Color(0xFFFEF2F2),
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
                       color: _isServerOnline
                           ? const Color(0xFF86EFAC)
                           : _isDiscoveringServer
-                              ? const Color(0xFFFDE047)
-                              : const Color(0xFFFECACA),
+                          ? const Color(0xFFFDE047)
+                          : const Color(0xFFFECACA),
                     ),
                   ),
                   child: Row(
@@ -1571,16 +1813,16 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                           _isDiscoveringServer
                               ? 'Mencari Server Laptop Otomatis...'
                               : _isServerOnline
-                                  ? 'Server Terhubung: $_serverIp (Otomatis)'
-                                  : 'Server Belum Aktif ($_serverIp)',
+                              ? 'Server Terhubung: $_serverIp (Otomatis)'
+                              : 'Server Belum Aktif ($_serverIp)',
                           style: TextStyle(
                             fontSize: 11,
                             fontWeight: FontWeight.w700,
                             color: _isServerOnline
                                 ? const Color(0xFF166534)
                                 : _isDiscoveringServer
-                                    ? const Color(0xFF854D0E)
-                                    : const Color(0xFF991B1B),
+                                ? const Color(0xFF854D0E)
+                                : const Color(0xFF991B1B),
                           ),
                         ),
                       ),
@@ -1596,9 +1838,14 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                               visualDensity: VisualDensity.compact,
                               padding: EdgeInsets.zero,
                               constraints: const BoxConstraints(),
-                              icon: const Icon(Icons.refresh_rounded, size: 16, color: Color(0xFF16A34A)),
+                              icon: const Icon(
+                                Icons.refresh_rounded,
+                                size: 16,
+                                color: Color(0xFF16A34A),
+                              ),
                               tooltip: 'Pindai Ulang',
-                              onPressed: () => _autoDiscoverServer(showFeedback: true),
+                              onPressed: () =>
+                                  _autoDiscoverServer(showFeedback: true),
                             ),
                           ],
                         )
@@ -1608,7 +1855,11 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                           child: const Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(Icons.radar_rounded, size: 14, color: Color(0xFFDC2626)),
+                              Icon(
+                                Icons.radar_rounded,
+                                size: 14,
+                                color: Color(0xFFDC2626),
+                              ),
                               SizedBox(width: 3),
                               Text(
                                 'Cari Lagi',
@@ -1648,26 +1899,29 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
           onPickGallery: () =>
               _pickImage(isTop: true, source: ImageSource.gallery),
           onAnalyze: _analyzeTop,
-          onRetake: () =>
-              _pickImage(isTop: true, source: ImageSource.camera),
+          onRetake: () => _pickImage(isTop: true, source: ImageSource.camera),
         ),
         const SizedBox(height: 14),
 
         // Slot 2: Sisi Samping
         _buildCameraSlotCard(
           title: 'Sisi Samping (Side View)',
-          subtitle: 'Memantau tinggi hipokotil & kekokohan batang',
+          subtitle: 'YOLO26n-Seg (Pengukuran tinggi cm & kekokohan batang)',
           icon: Icons.height_rounded,
           imageFile: _sideImage,
           isAnalyzing: _isAnalyzingSide,
           result: _sideResult,
+          annotatedBase64: _sideAnnotatedImageBase64,
+          showAnnotated: _showSideAnnotated,
+          onToggleAnnotated: () {
+            setState(() => _showSideAnnotated = !_showSideAnnotated);
+          },
           onTakePhoto: () =>
               _pickImage(isTop: false, source: ImageSource.camera),
           onPickGallery: () =>
               _pickImage(isTop: false, source: ImageSource.gallery),
           onAnalyze: _analyzeSide,
-          onRetake: () =>
-              _pickImage(isTop: false, source: ImageSource.camera),
+          onRetake: () => _pickImage(isTop: false, source: ImageSource.camera),
         ),
         const SizedBox(height: 14),
 
