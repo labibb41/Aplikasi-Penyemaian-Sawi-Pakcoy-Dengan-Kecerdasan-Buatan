@@ -593,7 +593,7 @@ async def predict_side_view(file: UploadFile = File(...), tray_width_cm: float =
                 else:
                     color_desc = f"Hijau ({green_ratio:.0%})"
 
-            if tinggi_cm <= 7.0:
+            if tinggi_cm <= 10.0:
                 status = "Normal"
                 color_bgr = (0, 220, 0)
                 counts["normal"] += 1
@@ -642,13 +642,13 @@ async def predict_side_view(file: UploadFile = File(...), tray_width_cm: float =
 
         if berat_cnt > 0:
             status_overall = "Etiolasi Berat Terdeteksi (Kutilang)"
-            rekomendasi = f"Ditemukan {berat_cnt} batang meninggi pucat (>7 cm). Batang rapuh, segera turunkan intensitas jarak lampu dan berikan sirkulasi udara."
+            rekomendasi = f"Ditemukan {berat_cnt} batang meninggi pucat (>10 cm). Batang rapuh, segera turunkan intensitas jarak lampu dan berikan sirkulasi udara."
         elif ringan_cnt > 0:
             status_overall = "Etiolasi Ringan Terdeteksi"
-            rekomendasi = f"Ditemukan {ringan_cnt} batang mulai meninggi (>7 cm) namun masih hijau. Tambahkan durasi penyinaran 1-2 jam."
+            rekomendasi = f"Ditemukan {ringan_cnt} batang mulai meninggi (>10 cm) namun masih hijau. Tambahkan durasi penyinaran 1-2 jam."
         else:
             status_overall = "Batang Kokoh (Normal)"
-            rekomendasi = f"Semua {total_tanaman} batang tanaman tumbuh proporsional (rata-rata {avg_height} cm). Kondisi pencahayaan saat ini sangat tepat."
+            rekomendasi = f"Semua {total_tanaman} batang tanaman tumbuh proporsional (<=10 cm, rata-rata {avg_height} cm). Kondisi pencahayaan saat ini sangat tepat."
 
         _, enc_jpg = cv2.imencode(".jpg", vis_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
         annotated_b64 = "data:image/jpeg;base64," + base64.b64encode(enc_jpg.tobytes()).decode("ascii")
