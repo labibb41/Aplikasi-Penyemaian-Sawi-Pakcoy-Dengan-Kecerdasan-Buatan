@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 
 import '../../core/constants/app_colors.dart';
 import '../main_shell/main_shell_screen.dart';
@@ -252,11 +252,124 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 28),
+
+                // Partner Section: PENS & PT Petrokimia Gresik
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 24,
+                      height: 1,
+                      color: AppColors.outline.withValues(alpha: 0.5),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      child: Text(
+                        'KOLABORASI & DUKUNGAN',
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: AppColors.textSecondary.withValues(alpha: 0.8),
+                        ),
+                      ),
+                    ),
+                    Container(
+                      width: 24,
+                      height: 1,
+                      color: AppColors.outline.withValues(alpha: 0.5),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+
+                // Partner Logo Pill
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(color: AppColors.outlineLight),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.04),
+                        blurRadius: 10,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // PENS Logo
+                      Image.asset(
+                        'assets/images/logo_pens.png',
+                        height: 22,
+                        width: 22,
+                        fit: BoxFit.contain,
+                      ),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'PENS',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: AppColors.textPrimary,
+                          letterSpacing: 0.4,
+                        ),
+                      ),
+                      // Dot separator
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Container(
+                          width: 4,
+                          height: 4,
+                          decoration: const BoxDecoration(
+                            color: AppColors.outline,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      ),
+                      // Petrokimia Logo
+                      Image.asset(
+                        'assets/images/logo_petrokimia.png',
+                        height: 22,
+                        fit: BoxFit.contain,
+                      ),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Petrokimia',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: AppColors.textPrimary,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+
+                Text(
+                  'Politeknik Elektronika Negeri Surabaya × PT Petrokimia Gresik',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w500,
+                    color: AppColors.textSecondary.withValues(alpha: 0.8),
+                    letterSpacing: 0.2,
+                  ),
+                ),
+                const SizedBox(height: 8),
                 const Text(
                   'Penyemaian Bibit Tanaman Berbasis IoT',
                   style: TextStyle(
-                    fontSize: 11,
+                    fontSize: 10.5,
                     color: AppColors.textSecondary,
                   ),
                 ),
