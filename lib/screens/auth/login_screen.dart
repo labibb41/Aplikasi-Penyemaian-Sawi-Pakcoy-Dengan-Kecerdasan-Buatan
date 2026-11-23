@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 
 import '../../core/constants/app_colors.dart';
 import '../main_shell/main_shell_screen.dart';
@@ -342,7 +342,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       const SizedBox(width: 8),
                       const Text(
-                        'Petrokimia',
+                        'PT Petrokimia Gresik',
                         style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w800,
@@ -385,4 +385,3 @@ class _LoginScreenState extends State<LoginScreen> {
 // ============================================================================
 // SCREEN 3: MAIN APP SHELL (SCAFFOLD + NAVIGATION BAR)
 // ============================================================================
-

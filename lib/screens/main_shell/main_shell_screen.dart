@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/constants/app_colors.dart';
 import '../../core/utils/date_formatter.dart';
@@ -103,8 +104,126 @@ class _MainShellScreenState extends State<MainShellScreen> {
     return null;
   }
 
-  void _showSnack(String message) {
-    showAppSnackBar(context, message);
+  DateTime? _lastBackPressTime;
+
+  void _showSnack(
+    String message, {
+    IconData icon = Icons.check_circle_rounded,
+    Color iconColor = const Color(0xFF4ADE80),
+  }) {
+    showAppSnackBar(context, message, icon: icon, iconColor: iconColor);
+  }
+
+  void _handleBackNavigation() {
+    if (_selectedIndex != 0) {
+      // Jika di tab Tanaman (1) atau Monitoring (2), kembali ke Tab Kontrol (0)
+      setState(() => _selectedIndex = 0);
+      return;
+    }
+
+    // Jika sudah berada di Tab Kontrol (0):
+    final now = DateTime.now();
+    if (_lastBackPressTime == null ||
+        now.difference(_lastBackPressTime!) > const Duration(seconds: 2)) {
+      _lastBackPressTime = now;
+      _showSnack(
+        'Tekan tombol kembali sekali lagi untuk keluar',
+        icon: Icons.exit_to_app_rounded,
+        iconColor: const Color(0xFFFBBF24),
+      );
+    } else {
+      _showExitOrLogoutDialog(isExitApp: true);
+    }
+  }
+
+  void _showExitOrLogoutDialog({required bool isExitApp}) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        titlePadding: const EdgeInsets.fromLTRB(22, 22, 22, 10),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 22),
+        actionsPadding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+        title: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: const Color(0xFFFEE2E2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(
+                Icons.logout_rounded,
+                color: Color(0xFFDC2626),
+                size: 20,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                isExitApp ? 'Keluar Aplikasi' : 'Konfirmasi Keluar',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          isExitApp
+              ? 'Apakah Anda yakin ingin menutup dan keluar dari aplikasi SemaiKu?'
+              : 'Apakah Anda yakin ingin keluar dari SemaiKu?',
+          style: const TextStyle(
+            fontSize: 13,
+            color: AppColors.textSecondary,
+            height: 1.4,
+          ),
+        ),
+        actions: [
+          OutlinedButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.textSecondary,
+              side: const BorderSide(color: AppColors.outline),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            ),
+            child: const Text(
+              'Batal',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              if (isExitApp) {
+                SystemNavigator.pop();
+              } else {
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(builder: (_) => const LoginScreen()),
+                );
+              }
+            },
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+            ),
+            child: Text(
+              isExitApp ? 'Keluar Aplikasi' : 'Keluar Akun',
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   // --------------------------------------------------------------------------
@@ -178,7 +297,7 @@ class _MainShellScreenState extends State<MainShellScreen> {
     });
     final p = _activePlant;
     if (p != null) {
-      _showSnack('Profil "${p.name}" diaktifkan');
+      _showSnack('Tanaman "${p.name}" diaktifkan');
     }
   }
 
@@ -269,177 +388,201 @@ class _MainShellScreenState extends State<MainShellScreen> {
       'Monitoring Kamera Bibit',
     ];
 
-    return Scaffold(
-      backgroundColor: AppColors.surface,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        surfaceTintColor: Colors.white,
-        elevation: 0,
-        bottom: const PreferredSize(
-          preferredSize: Size.fromHeight(1),
-          child: Divider(height: 1, color: AppColors.outlineLight),
-        ),
-        titleSpacing: 16,
-        title: Row(
-          children: [
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        _handleBackNavigation();
+      },
+      child: Scaffold(
+        backgroundColor: AppColors.surface,
+        appBar: AppBar(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.white,
+          elevation: 0,
+          bottom: const PreferredSize(
+            preferredSize: Size.fromHeight(1),
+            child: Divider(height: 1, color: AppColors.outlineLight),
+          ),
+          titleSpacing: 16,
+          title: Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: AppColors.primaryContainer,
+                  borderRadius: BorderRadius.circular(11),
+                  border: Border.all(
+                    color: AppColors.primary.withValues(alpha: 0.18),
+                  ),
+                ),
+                child: const Icon(
+                  Icons.eco_rounded,
+                  color: AppColors.primary,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'SemaiKu',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                  Text(
+                    subtitles[_selectedIndex],
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
             Container(
-              width: 36,
-              height: 36,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               decoration: BoxDecoration(
                 color: AppColors.primaryContainer,
-                borderRadius: BorderRadius.circular(11),
+                borderRadius: BorderRadius.circular(999),
                 border: Border.all(
                   color: AppColors.primary.withValues(alpha: 0.18),
                 ),
               ),
-              child: const Icon(
-                Icons.eco_rounded,
-                color: AppColors.primary,
-                size: 22,
+              child: const Row(
+                children: [
+                  CircleAvatar(radius: 3.5, backgroundColor: AppColors.primary),
+                  SizedBox(width: 5),
+                  Text(
+                    'MQTT: Online',
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.onPrimaryContainer,
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'SemaiKu',
+            const SizedBox(width: 6),
+            IconButton(
+              tooltip: 'Keluar',
+              icon: const Icon(Icons.logout_rounded, size: 20),
+              onPressed: () => _showExitOrLogoutDialog(isExitApp: false),
+            ),
+            const SizedBox(width: 4),
+          ],
+        ),
+        body: IndexedStack(
+          index: _selectedIndex,
+          children: [
+            MonitoringTab(
+              activePlant: _activePlant,
+              mode: _mode,
+              suhu: _suhu,
+              lembabUdara: _lembabUdara,
+              lembabTanah: _lembabTanah,
+              lux: _lux,
+              lastUpdateTs: _lastUpdateTs,
+              kipasOn: _kipasOn,
+              sprayerOn: _sprayerOn,
+              lamp1On: _lamp1On,
+              lamp2On: _lamp2On,
+              onRefreshSensor: _simulateSensorRefresh,
+              onModeChanged: _setMode,
+              onSelectPlant: () => setState(() => _selectedIndex = 1),
+              onDeactivatePlant: _deactivatePlant,
+              onKipasChanged: _onKipasChanged,
+              onSprayerChanged: _onSprayerChanged,
+              onMasterLampChanged: _onMasterLampChanged,
+              onToggleLamp1: _onToggleLamp1,
+              onToggleLamp2: _onToggleLamp2,
+            ),
+            TanamanTab(
+              plants: _plants,
+              activePlantId: _activePlantId,
+              onActivatePlant: _activatePlant,
+              onDeactivatePlant: _deactivatePlant,
+              onEditPlant: _openPlantForm,
+              onDeletePlant: _deletePlant,
+            ),
+            const EtiolasiTab(),
+          ],
+        ),
+        floatingActionButton: _selectedIndex == 1
+            ? FloatingActionButton.extended(
+                onPressed: () => _openPlantForm(),
+                elevation: 3,
+                highlightElevation: 6,
+                backgroundColor: const Color(0xFFE8F5E9),
+                foregroundColor: const Color(0xFF0C3B20),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: const BorderSide(color: Color(0xFF81C784), width: 1.4),
+                ),
+                icon: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: const BoxDecoration(
+                    color: AppColors.primary,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.add_rounded,
+                    color: Colors.white,
+                    size: 16,
+                  ),
+                ),
+                label: const Text(
+                  'Tambah Tanaman',
                   style: TextStyle(
-                    fontSize: 16,
                     fontWeight: FontWeight.w800,
-                    color: AppColors.textPrimary,
+                    fontSize: 13,
+                    color: Color(0xFF0C3B20),
+                    letterSpacing: 0.2,
                   ),
                 ),
-                Text(
-                  subtitles[_selectedIndex],
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: AppColors.textSecondary,
-                  ),
-                ),
-              ],
+              )
+            : null,
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: _selectedIndex,
+          backgroundColor: Colors.white,
+          indicatorColor: AppColors.primaryContainer,
+          onDestinationSelected: (idx) => setState(() => _selectedIndex = idx),
+          destinations: const [
+            NavigationDestination(
+              icon: Icon(Icons.dashboard_outlined),
+              selectedIcon: Icon(
+                Icons.dashboard_rounded,
+                color: AppColors.onPrimaryContainer,
+              ),
+              label: 'Kontrol',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.eco_outlined),
+              selectedIcon: Icon(
+                Icons.eco_rounded,
+                color: AppColors.onPrimaryContainer,
+              ),
+              label: 'Tanaman',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.camera_alt_outlined),
+              selectedIcon: Icon(
+                Icons.camera_alt_rounded,
+                color: AppColors.onPrimaryContainer,
+              ),
+              label: 'Monitoring',
             ),
           ],
         ),
-        actions: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            decoration: BoxDecoration(
-              color: AppColors.primaryContainer,
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(
-                color: AppColors.primary.withValues(alpha: 0.18),
-              ),
-            ),
-            child: const Row(
-              children: [
-                CircleAvatar(radius: 3.5, backgroundColor: AppColors.primary),
-                SizedBox(width: 5),
-                Text(
-                  'MQTT: Online',
-                  style: TextStyle(
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.onPrimaryContainer,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 6),
-          IconButton(
-            tooltip: 'Keluar',
-            icon: const Icon(Icons.logout_rounded, size: 20),
-            onPressed: () {
-              Navigator.of(context).pushReplacement(
-                MaterialPageRoute(builder: (_) => const LoginScreen()),
-              );
-            },
-          ),
-          const SizedBox(width: 4),
-        ],
-      ),
-      body: IndexedStack(
-        index: _selectedIndex,
-        children: [
-          MonitoringTab(
-            activePlant: _activePlant,
-            mode: _mode,
-            suhu: _suhu,
-            lembabUdara: _lembabUdara,
-            lembabTanah: _lembabTanah,
-            lux: _lux,
-            lastUpdateTs: _lastUpdateTs,
-            kipasOn: _kipasOn,
-            sprayerOn: _sprayerOn,
-            lamp1On: _lamp1On,
-            lamp2On: _lamp2On,
-            onRefreshSensor: _simulateSensorRefresh,
-            onModeChanged: _setMode,
-            onSelectPlant: () => setState(() => _selectedIndex = 1),
-            onDeactivatePlant: _deactivatePlant,
-            onKipasChanged: _onKipasChanged,
-            onSprayerChanged: _onSprayerChanged,
-            onMasterLampChanged: _onMasterLampChanged,
-            onToggleLamp1: _onToggleLamp1,
-            onToggleLamp2: _onToggleLamp2,
-          ),
-          TanamanTab(
-            plants: _plants,
-            activePlantId: _activePlantId,
-            onActivatePlant: _activatePlant,
-            onDeactivatePlant: _deactivatePlant,
-            onEditPlant: _openPlantForm,
-            onDeletePlant: _deletePlant,
-          ),
-          const EtiolasiTab(),
-        ],
-      ),
-      floatingActionButton: _selectedIndex == 1
-          ? FloatingActionButton.extended(
-              onPressed: () => _openPlantForm(),
-              backgroundColor: AppColors.primary,
-              foregroundColor: Colors.white,
-              icon: const Icon(Icons.add_rounded),
-              label: const Text(
-                'Tambah Tanaman',
-                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5),
-              ),
-            )
-          : null,
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _selectedIndex,
-        backgroundColor: Colors.white,
-        indicatorColor: AppColors.primaryContainer,
-        onDestinationSelected: (idx) => setState(() => _selectedIndex = idx),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.dashboard_outlined),
-            selectedIcon: Icon(
-              Icons.dashboard_rounded,
-              color: AppColors.onPrimaryContainer,
-            ),
-            label: 'Kontrol',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.eco_outlined),
-            selectedIcon: Icon(
-              Icons.eco_rounded,
-              color: AppColors.onPrimaryContainer,
-            ),
-            label: 'Tanaman',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.camera_alt_outlined),
-            selectedIcon: Icon(
-              Icons.camera_alt_rounded,
-              color: AppColors.onPrimaryContainer,
-            ),
-            label: 'Monitoring',
-          ),
-        ],
       ),
     );
   }
 }
-
