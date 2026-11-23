@@ -380,6 +380,11 @@ void saveConfig();
 void loadConfig();
 void startSprayerCountdown(int duration);
 void checkScheduledWatering();
+void forceAllTogglesOff();
+void publishStatus();
+void publishTelemetry();
+void publishAlert(const char *type, int duration = 0, const char *msg = nullptr);
+void connectMqtt();
 
 /* ================= BH1750 LUX SENSOR (BIT-BANG I2C on GPIO 25, 26) ================= */
 static inline void luxDelay() { delayMicroseconds(5); }
