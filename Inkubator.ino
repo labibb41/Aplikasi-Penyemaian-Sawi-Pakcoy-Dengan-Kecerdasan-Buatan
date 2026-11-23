@@ -136,10 +136,10 @@ static FuzzyOutput runFuzzy(float suhu, float tanah) {
 #define WIFI_PASSWORD "Petrokimia@2024"
 
 /* ================= KONFIGURASI BROKER MQTT ================= */
-// Pilihan mode broker:
-// true  = Gunakan EMQX Cloud (Serverless Internet Publik untuk simulasi & kendali TA tanpa intranet)
-// false = Gunakan Broker Intranet Perusahaan (10.14.41.20:1773 di area kantor/greenhouse)
-#define USE_EMQX_CLOUD true
+// Mode Broker:
+// true  = DUAL CLIENT AKTIF (Kirim paralel ke Server Perusahaan & EMQX Cloud secara bersamaan)
+// false = SINGLE CLIENT (Hanya kirim ke EMQX Cloud)
+#define ENABLE_DUAL_MQTT true
 
 // 1) Parameter EMQX Cloud (Mode Internet Publik / TA)
 #define CLOUD_MQTT_HOST "z101725a.ala.asia-southeast1.emqxsl.com"
@@ -152,18 +152,6 @@ static FuzzyOutput runFuzzy(float suhu, float tanah) {
 #define LOCAL_MQTT_PORT 1773
 #define LOCAL_MQTT_USER "buncop_esp"
 #define LOCAL_MQTT_PASS "Kinds123"
-
-#if USE_EMQX_CLOUD
-  #define MQTT_HOST CLOUD_MQTT_HOST
-  #define MQTT_PORT CLOUD_MQTT_PORT
-  #define MQTT_USER CLOUD_MQTT_USER
-  #define MQTT_PASS CLOUD_MQTT_PASS
-#else
-  #define MQTT_HOST LOCAL_MQTT_HOST
-  #define MQTT_PORT LOCAL_MQTT_PORT
-  #define MQTT_USER LOCAL_MQTT_USER
-  #define MQTT_PASS LOCAL_MQTT_PASS
-#endif
 
 /* ================= PIN ================= */
 // Konfigurasi Pin Relay (Active LOW)
@@ -244,13 +232,15 @@ String topicCommand;
 String topicAlert;
 
 /* ================= OBJECTS ================= */
-#if USE_EMQX_CLOUD
-  #include <WiFiClientSecure.h>
-  WiFiClientSecure wifiClient;
-#else
-  WiFiClient       wifiClient;
+#include <WiFiClientSecure.h>
+
+WiFiClient       localWifiClient;
+WiFiClientSecure cloudWifiClient;
+
+PubSubClient mqttCloud(cloudWifiClient);
+#if ENABLE_DUAL_MQTT
+PubSubClient mqttLocal(localWifiClient);
 #endif
-PubSubClient      mqtt(wifiClient);
 DHT               dht(DHTPIN, DHTTYPE);
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
 RTC_DS3231        rtc;
@@ -1052,7 +1042,18 @@ bool readSoilMoistureDigitalWet() {
 void publishJson(const String &topic, JsonDocument &doc) {
   char buf[1024];
   size_t len = serializeJson(doc, buf, sizeof(buf));
-  mqtt.publish(topic.c_str(), (const uint8_t*)buf, len, true);
+
+  // 1) Publish ke EMQX Cloud (Internet Publik / Aplikasi SemaiKu)
+  if (mqttCloud.connected()) {
+    mqttCloud.publish(topic.c_str(), (const uint8_t*)buf, len, true);
+  }
+
+#if ENABLE_DUAL_MQTT
+  // 2) Publish ke Broker Intranet Perusahaan (10.14.41.20)
+  if (mqttLocal.connected()) {
+    mqttLocal.publish(topic.c_str(), (const uint8_t*)buf, len, true);
+  }
+#endif
 }
 
 void publishTelemetry() {
@@ -1550,9 +1551,22 @@ void handleCommand(const char *payload, unsigned int length) {
   Serial.printf("[CMD] unknown: %s\n", type);
 }
 
-void mqttCallback(char *topic, byte *payload, unsigned int length) {
-  if (String(topic)==topicCommand) handleCommand((const char*)payload, length);
+void mqttCallbackHandler(const char *source, char *topic, byte *payload, unsigned int length) {
+  if (String(topic) == topicCommand) {
+    Serial.printf("[CMD RECV via %s]\n", source);
+    handleCommand((const char*)payload, length);
+  }
 }
+
+void mqttCloudCallback(char *topic, byte *payload, unsigned int length) {
+  mqttCallbackHandler("EMQX_CLOUD", topic, payload, length);
+}
+
+#if ENABLE_DUAL_MQTT
+void mqttLocalCallback(char *topic, byte *payload, unsigned int length) {
+  mqttCallbackHandler("LOCAL_INTRANET", topic, payload, length);
+}
+#endif
 
 /* ================= SCHEDULED WATERING (INDEPENDENT) ================= */
 void checkScheduledWatering() {
@@ -1710,17 +1724,39 @@ void connectWiFiBoot() {
   lcd.clear();
 }
 
-void connectMqtt() {
-  if (mqtt.connected()) return;
-  String cid = String("esp-inkubator-")+MQTT_DEVICE_ID;
-  if (mqtt.connect(cid.c_str(), MQTT_USER, MQTT_PASS,
+void connectMqttCloud() {
+  if (mqttCloud.connected()) return;
+  String cid = String("esp-cloud-") + MQTT_DEVICE_ID;
+  if (mqttCloud.connect(cid.c_str(), CLOUD_MQTT_USER, CLOUD_MQTT_PASS,
       topicStatus.c_str(), 1, true, "{\"online\":false}")) {
-    mqtt.subscribe(topicCommand.c_str(), 1);
+    mqttCloud.subscribe(topicCommand.c_str(), 1);
     publishStatus();
-    Serial.println("[MQTT] Connected");
+    Serial.println("[MQTT CLOUD] Terhubung ke EMQX Cloud (Internet Publik)");
   } else {
-    Serial.printf("[MQTT] FAIL rc=%d\n", mqtt.state());
+    Serial.printf("[MQTT CLOUD] Gagal konek rc=%d\n", mqttCloud.state());
   }
+}
+
+#if ENABLE_DUAL_MQTT
+void connectMqttLocal() {
+  if (mqttLocal.connected()) return;
+  String cid = String("esp-local-") + MQTT_DEVICE_ID;
+  if (mqttLocal.connect(cid.c_str(), LOCAL_MQTT_USER, LOCAL_MQTT_PASS,
+      topicStatus.c_str(), 1, true, "{\"online\":false}")) {
+    mqttLocal.subscribe(topicCommand.c_str(), 1);
+    publishStatus();
+    Serial.println("[MQTT LOCAL] Terhubung ke Server Perusahaan (10.14.41.20)");
+  } else {
+    Serial.printf("[MQTT LOCAL] Gagal konek rc=%d\n", mqttLocal.state());
+  }
+}
+#endif
+
+void connectMqtt() {
+  connectMqttCloud();
+#if ENABLE_DUAL_MQTT
+  connectMqttLocal();
+#endif
 }
 
 /* ================= SETUP ================= */
@@ -1830,20 +1866,27 @@ void setup() {
   WiFi.setSleep(false);
   esp_task_wdt_reset();
 
-#if USE_EMQX_CLOUD
-  wifiClient.setInsecure(); // Bypass verifikasi root CA untuk port SSL/TLS 8883
-  Serial.printf("[MQTT] Mode: EMQX CLOUD (%s:%d)\n", MQTT_HOST, MQTT_PORT);
+  cloudWifiClient.setInsecure(); // Bypass verifikasi sertifikat root CA untuk port SSL/TLS 8883
+
+  mqttCloud.setServer(CLOUD_MQTT_HOST, CLOUD_MQTT_PORT);
+  mqttCloud.setCallback(mqttCloudCallback);
+  mqttCloud.setBufferSize(1024);
+  mqttCloud.setKeepAlive(60);
+
+#if ENABLE_DUAL_MQTT
+  mqttLocal.setServer(LOCAL_MQTT_HOST, LOCAL_MQTT_PORT);
+  mqttLocal.setCallback(mqttLocalCallback);
+  mqttLocal.setBufferSize(1024);
+  mqttLocal.setKeepAlive(60);
+  Serial.printf("[MQTT] Mode: DUAL CLIENT AKTIF (Server Perusahaan: %s:%d + EMQX Cloud: %s:%d)\n",
+    LOCAL_MQTT_HOST, LOCAL_MQTT_PORT, CLOUD_MQTT_HOST, CLOUD_MQTT_PORT);
 #else
-  Serial.printf("[MQTT] Mode: INTRANET PERUSAHAAN (%s:%d)\n", MQTT_HOST, MQTT_PORT);
+  Serial.printf("[MQTT] Mode: EMQX CLOUD ONLY (%s:%d)\n", CLOUD_MQTT_HOST, CLOUD_MQTT_PORT);
 #endif
 
-  mqtt.setServer(MQTT_HOST, MQTT_PORT);
-  mqtt.setCallback(mqttCallback);
-  mqtt.setBufferSize(1024);
-  mqtt.setKeepAlive(60);
   connectMqtt();
 
-  Serial.println("[BOOT] READY — Fuzzy 9-Rules + RTC + Lux active");
+  Serial.println("[BOOT] READY — Fuzzy 9-Rules + RTC + Lux + Dual MQTT active");
 }
 
 /* ================= LOOP ================= */
@@ -1872,12 +1915,29 @@ void loop() {
     prevWifiState = true;
 #endif
 
-    if (!mqtt.connected()) {
-      static unsigned long lmr=0;
-      if (now-lmr>=10000||lmr==0) { lmr=now; connectMqtt(); }
+    // 1.1) MQTT Cloud (EMQX) Loop & Non-blocking Reconnect
+    static unsigned long lastCloudRetry = 0;
+    if (!mqttCloud.connected()) {
+      if (now - lastCloudRetry >= 10000 || lastCloudRetry == 0) {
+        lastCloudRetry = now;
+        connectMqttCloud();
+      }
     } else {
-      mqtt.loop();
+      mqttCloud.loop();
     }
+
+#if ENABLE_DUAL_MQTT
+    // 1.2) MQTT Local Intranet Loop & Non-blocking Reconnect
+    static unsigned long lastLocalRetry = 0;
+    if (!mqttLocal.connected()) {
+      if (now - lastLocalRetry >= 10000 || lastLocalRetry == 0) {
+        lastLocalRetry = now;
+        connectMqttLocal();
+      }
+    } else {
+      mqttLocal.loop();
+    }
+#endif
   }
 
   // 2) Sensor push (tiap 5 detik)
