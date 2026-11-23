@@ -135,11 +135,35 @@ static FuzzyOutput runFuzzy(float suhu, float tanah) {
 #define WIFI_SSID     "Buncop 3"
 #define WIFI_PASSWORD "Petrokimia@2024"
 
-/* ================= MQTT ================= */
-#define MQTT_HOST "10.14.41.20"
-#define MQTT_PORT 1773
-#define MQTT_USER "buncop_esp"
-#define MQTT_PASS "Kinds123"
+/* ================= KONFIGURASI BROKER MQTT ================= */
+// Pilihan mode broker:
+// true  = Gunakan EMQX Cloud (Serverless Internet Publik untuk simulasi & kendali TA tanpa intranet)
+// false = Gunakan Broker Intranet Perusahaan (10.14.41.20:1773 di area kantor/greenhouse)
+#define USE_EMQX_CLOUD true
+
+// 1) Parameter EMQX Cloud (Mode Internet Publik / TA)
+#define CLOUD_MQTT_HOST "z101725a.ala.asia-southeast1.emqxsl.com"
+#define CLOUD_MQTT_PORT 8883
+#define CLOUD_MQTT_USER "Semaiku"
+#define CLOUD_MQTT_PASS "semaiku123"
+
+// 2) Parameter Intranet Perusahaan (Mode Lokal Greenhouse)
+#define LOCAL_MQTT_HOST "10.14.41.20"
+#define LOCAL_MQTT_PORT 1773
+#define LOCAL_MQTT_USER "buncop_esp"
+#define LOCAL_MQTT_PASS "Kinds123"
+
+#if USE_EMQX_CLOUD
+  #define MQTT_HOST CLOUD_MQTT_HOST
+  #define MQTT_PORT CLOUD_MQTT_PORT
+  #define MQTT_USER CLOUD_MQTT_USER
+  #define MQTT_PASS CLOUD_MQTT_PASS
+#else
+  #define MQTT_HOST LOCAL_MQTT_HOST
+  #define MQTT_PORT LOCAL_MQTT_PORT
+  #define MQTT_USER LOCAL_MQTT_USER
+  #define MQTT_PASS LOCAL_MQTT_PASS
+#endif
 
 /* ================= PIN ================= */
 // Konfigurasi Pin Relay (Active LOW)
@@ -220,7 +244,12 @@ String topicCommand;
 String topicAlert;
 
 /* ================= OBJECTS ================= */
-WiFiClient        wifiClient;
+#if USE_EMQX_CLOUD
+  #include <WiFiClientSecure.h>
+  WiFiClientSecure wifiClient;
+#else
+  WiFiClient       wifiClient;
+#endif
 PubSubClient      mqtt(wifiClient);
 DHT               dht(DHTPIN, DHTTYPE);
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
@@ -246,7 +275,6 @@ bool lastManualSprayerCommand = false;
 bool tempNotified  = false;
 bool humNotified   = false;
 
-int lampPowerPercent  = 100;
 int sprayerDuration   = 30;  // Default durasi semprot 30 detik
 int sprayerRunDuration = 0;
 
@@ -281,7 +309,6 @@ int    scheduleCount = 3;
 String activePlantId          = "pakcoy_01";
 String activePlantName        = "Pakcoy";
 float  plantMaxTemp           = 35.0f;
-int    plantLightPwm          = 100;
 String plantLightStart        = "05:30";  // Jam nyala reguler harian (pagi)
 String plantLightEnd          = "18:00";  // Jam mati harian (malam)
 String plantFirstLightStart   = "15:00";  // Khusus Hari ke-1 (saat penutup semai dibuka di sore hari)
@@ -595,7 +622,7 @@ void processSerialCommand(String cmd) {
     Serial.printf("Mode Operasi          : %s\n", mode.c_str());
     Serial.printf("Tanaman Aktif (NVS)   : %s (ID: %s)\n", activePlantName.c_str(), activePlantId.c_str());
     Serial.printf("Suhu Optimal Maks     : %.1f °C\n", plantMaxTemp);
-    Serial.printf("Penyinaran            : %s s/d %s (PWM: %d%%)\n", plantLightStart.c_str(), plantLightEnd.c_str(), plantLightPwm);
+    Serial.printf("Penyinaran            : %s s/d %s\n", plantLightStart.c_str(), plantLightEnd.c_str());
     Serial.printf("Siklus Fase           : Gelap %d hari, Terang %d hari\n", plantDarkDays, plantLightDays);
     Serial.printf("Durasi Sprayer        : %d detik (Auto: %d detik)\n", sprayerDuration, autoSprayerDuration);
     Serial.printf("Jadwal Siram Auto (%d) : ", autoScheduleCount);
@@ -615,7 +642,7 @@ void processSerialCommand(String cmd) {
         t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
     }
     Serial.println("------------------------- STATUS RELAY --------------------------");
-    Serial.printf("Lampu Grow Light      : %s (%s, PWM: %d%%)\n", lampRelayOn ? "ON" : "OFF", mode.c_str(), lampPowerPercent);
+    Serial.printf("Lampu Grow Light      : %s (%s, %d Lampu)\n", lampRelayOn ? "ON" : "OFF", mode.c_str(), autoLampsActive);
     Serial.printf("Kipas / Fan           : %s\n", fanRelayOn ? "ON" : "OFF");
     Serial.printf("Sprayer / Pompa       : %s\n", sprayerActive ? "ON (MENYEMPROT)" : "OFF");
     Serial.println("=================================================================\n");
@@ -838,8 +865,6 @@ void forceAllTogglesOff() {
 
 /* ================= LAMP ================= */
 void applyLampOutput() {
-  if (lampPowerPercent <= 0) lampPowerPercent = 100;
-  lampPowerPercent = constrain(lampPowerPercent, 0, 100);
   bool turnOn = lampRelayOn; // Lampu menggunakan relay ON/OFF murni
 
   if (mode == "auto") {
@@ -1074,7 +1099,6 @@ void publishStatus() {
   doc["relay"]["sprayer"]  = sprayerActive;
   doc["auto_lamps_count"]  = autoLampsActive;
   doc["etiolasi_override"] = etiolasiOverride;
-  doc["lamp_pwm"]     = lampPowerPercent;
   doc["active_plant"] = activePlantId;
   doc["active_plant_name"] = activePlantName;
   doc["sprayer_duration"] = sprayerDuration;
@@ -1113,7 +1137,7 @@ void publishAlert(const char *type, int duration = 0, const char *msg = nullptr)
  * Alur:
  *  1. Hitung fase (gelap/terang) dan window jam → shouldLampOn
  *  2. Jalankan fuzzy 2-input (suhu, tanah) → fOut.pompa, fOut.kipas
- *  3. LAMPU  → ON/OFF berdasar jadwal; PWM konstan (plantLightPwm)
+ *  3. LAMPU  → ON/OFF berdasar jadwal dan fase tanaman
  *  4. KIPAS  → ON jika fuzzy kipas >= 0.5 (dominan nyala)
  *  5. SPRAYER→ fuzzy pompa → konversi ke durasi; cooldown 15 menit
  *              + jadwal backup tetap berjalan
@@ -1122,8 +1146,6 @@ void autoLogic() {
   if (mode != "auto") return;
   if (activePlantId.isEmpty()) { forceAllTogglesOff(); return; }
 
-  // Sinkronkan PWM lampu
-  if (plantLightPwm != lampPowerPercent) lampPowerPercent = plantLightPwm;
 
   // ── Fase & window lampu ──────────────────────────────────────
   int phaseDay, phaseLength;
@@ -1349,7 +1371,6 @@ void handleCommand(const char *payload, unsigned int length) {
         else if (!sv) { relayWrite(RELAY_SPRAYER,false); sprayerActive=false; lastManualSprayerCommand=false; }
       }
     }
-    if (val.containsKey("lamp_pwm")&&mode!="auto") { lampPowerPercent=constrain(val["lamp_pwm"].as<int>(),0,100); applyLampOutput(); }
     if (val.containsKey("sprayer_times")) {
       JsonArray times=val["sprayer_times"]; scheduleCount=0;
       for (JsonVariant t:times) { if(scheduleCount>=MAX_SCHEDULE)break; String ts=normalizeTimeToken(t.as<String>()); if(isValidHHMM(ts))manualSchedule[scheduleCount++]=ts; }
@@ -1399,11 +1420,6 @@ void handleCommand(const char *payload, unsigned int length) {
     return;
   }
 
-  if (strcmp(type,"set_lamp_pwm")==0) {
-    if (mode=="auto") return;
-    lampPowerPercent=constrain(doc["value"].as<int>(),0,100);
-    applyLampOutput(); saveConfig(); publishStatus(); return;
-  }
 
   if (strcmp(type,"set_active_plant")==0) {
     if (doc["value"].is<const char*>() || doc["value"].is<String>()) {
@@ -1434,7 +1450,6 @@ void handleCommand(const char *payload, unsigned int length) {
     }
     if (activePlantId.isEmpty()) { activePlantName=""; forceAllTogglesOff(); saveConfig(); publishStatus(); return; }
     plantMaxTemp   = p["temp_optimal_max"]|35.0f;
-    plantLightPwm  = constrain(p["light_pwm"]|100,0,100);
     String ls=p["lighting_start"]|"05:30", le=p["lighting_end"]|"18:00";
     plantLightStart=isValidHHMM(normalizeTimeToken(ls))?normalizeTimeToken(ls):"05:30";
     plantLightEnd  =isValidHHMM(normalizeTimeToken(le))?normalizeTimeToken(le):"18:00";
@@ -1461,8 +1476,8 @@ void handleCommand(const char *payload, unsigned int length) {
     }
     autoSprayerDuration=constrain(p["watering_duration"]|10,1,600);
     lastSprayerTriggerMinute=nowMinuteKey();
-    Serial.printf("[CMD] Tanaman aktif diset & disimpan: %s (%s) | MaxTemp=%.1f | Light=%s-%s (PWM:%d%%) | %d Lampu Aktif | Siram=%ds\n",
-      activePlantName.c_str(), activePlantId.c_str(), plantMaxTemp, plantLightStart.c_str(), plantLightEnd.c_str(), plantLightPwm, autoLampsActive, autoSprayerDuration);
+    Serial.printf("[CMD] Tanaman aktif diset & disimpan: %s (%s) | MaxTemp=%.1f | Light=%s-%s | %d Lampu Aktif | Siram=%ds\n",
+      activePlantName.c_str(), activePlantId.c_str(), plantMaxTemp, plantLightStart.c_str(), plantLightEnd.c_str(), autoLampsActive, autoSprayerDuration);
     saveConfig(); publishStatus(); return;
   }
 
@@ -1565,7 +1580,7 @@ void checkScheduledWatering() {
 /* ================= CONFIG PERSISTENCE ================= */
 void saveConfig() {
   DynamicJsonDocument doc(2048);
-  doc["mode"]=mode; doc["lampPowerPercent"]=lampPowerPercent;
+  doc["mode"]=mode;
   doc["sprayerDuration"]=sprayerDuration;
   doc["lampRelayOn"]=lampRelayOn;
   doc["lamp1"]=lampPinsState[0]; doc["lamp2"]=lampPinsState[1];
@@ -1574,7 +1589,7 @@ void saveConfig() {
   JsonArray mt=doc.createNestedArray("manualSchedule");
   for (int i=0;i<scheduleCount;i++) mt.add(manualSchedule[i]);
   doc["activePlantId"]=activePlantId; doc["activePlantName"]=activePlantName;
-  doc["plantMaxTemp"]=plantMaxTemp; doc["plantLightPwm"]=plantLightPwm;
+  doc["plantMaxTemp"]=plantMaxTemp;
   doc["plantLightStart"]=plantLightStart; doc["plantLightEnd"]=plantLightEnd;
   doc["plantFirstLightStart"]=plantFirstLightStart;
   doc["plantDarkDays"]=plantDarkDays; doc["plantLightDays"]=plantLightDays;
@@ -1597,7 +1612,7 @@ void loadConfig() {
   if (inp.length()>0) {
     DynamicJsonDocument doc(2048);
     if (!deserializeJson(doc,inp)) {
-      mode=doc["mode"]|"manual"; lampPowerPercent=doc["lampPowerPercent"]|100;
+      mode=doc["mode"]|"manual";
       sprayerDuration=doc["sprayerDuration"]|30;
       lampRelayOn=doc["lampRelayOn"]|false; fanRelayOn=doc["fanRelayOn"]|false;
       lampPinsState[0]=doc.containsKey("lamp1") ? doc["lamp1"].as<bool>() : lampRelayOn;
@@ -1617,7 +1632,7 @@ void loadConfig() {
         }
       }
 
-      plantMaxTemp=doc["plantMaxTemp"]|35.0f; plantLightPwm=doc["plantLightPwm"]|100;
+      plantMaxTemp=doc["plantMaxTemp"]|35.0f;
       plantLightStart=doc["plantLightStart"]|"05:30"; plantLightEnd=doc["plantLightEnd"]|"18:00";
       plantFirstLightStart=doc["plantFirstLightStart"]|"15:00";
       plantDarkDays=doc["plantDarkDays"]|2; plantLightDays=doc["plantLightDays"]|12;
@@ -1644,7 +1659,7 @@ void loadConfig() {
       Serial.printf("  - Mode Operasi       : %s\n", mode.c_str());
       Serial.printf("  - Tanaman Tersimpan  : %s (ID: %s)\n", activePlantName.c_str(), activePlantId.c_str());
       Serial.printf("  - Suhu Optimal Max   : %.1f C\n", plantMaxTemp);
-      Serial.printf("  - Penyinaran         : %s s/d %s (PWM: %d%%)\n", plantLightStart.c_str(), plantLightEnd.c_str(), plantLightPwm);
+      Serial.printf("  - Penyinaran         : %s s/d %s\n", plantLightStart.c_str(), plantLightEnd.c_str());
       Serial.printf("  - Siklus Fase        : Gelap %d hari, Terang %d hari\n", plantDarkDays, plantLightDays);
       Serial.printf("  - Durasi Sprayer Auto: %d detik\n", autoSprayerDuration);
       Serial.printf("  - Jadwal Auto (%d)   : ", autoScheduleCount);
@@ -1663,8 +1678,8 @@ void loadConfig() {
 
 /* ================= LOG ================= */
 void logAutoScheduleConfig() {
-  Serial.printf("[AUTO CFG] plant=%s tempMax=%.1f pwm=%d light=%s-%s dur=%d dark=%d light=%d\n",
-    activePlantId.c_str(), plantMaxTemp, plantLightPwm,
+  Serial.printf("[AUTO CFG] plant=%s tempMax=%.1f light=%s-%s dur=%d dark=%d light=%d\n",
+    activePlantId.c_str(), plantMaxTemp,
     plantLightStart.c_str(), plantLightEnd.c_str(),
     autoSprayerDuration, plantDarkDays, plantLightDays);
 }
@@ -1814,6 +1829,13 @@ void setup() {
   connectWiFiBoot();
   WiFi.setSleep(false);
   esp_task_wdt_reset();
+
+#if USE_EMQX_CLOUD
+  wifiClient.setInsecure(); // Bypass verifikasi root CA untuk port SSL/TLS 8883
+  Serial.printf("[MQTT] Mode: EMQX CLOUD (%s:%d)\n", MQTT_HOST, MQTT_PORT);
+#else
+  Serial.printf("[MQTT] Mode: INTRANET PERUSAHAAN (%s:%d)\n", MQTT_HOST, MQTT_PORT);
+#endif
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(mqttCallback);

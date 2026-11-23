@@ -1,9 +1,10 @@
-import 'dart:math';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/constants/app_colors.dart';
+import '../../core/services/mqtt/mqtt_service.dart';
 import '../../core/utils/date_formatter.dart';
 import '../../core/utils/snackbar_utils.dart';
 import '../../models/control_mode.dart';
@@ -36,6 +37,11 @@ class _MainShellScreenState extends State<MainShellScreen> {
   bool _sprayerOn = false;
   bool _lamp1On = true;
   bool _lamp2On = false;
+
+  // MQTT State
+  MqttConnectionStatus _mqttStatus = MqttConnectionStatus.disconnected;
+  StreamSubscription<MqttConnectionStatus>? _mqttStatusSub;
+  StreamSubscription<IncubatorTelemetry>? _telemetrySub;
 
   // Plant Profiles State
   int? _activePlantId = 1;
@@ -102,6 +108,64 @@ class _MainShellScreenState extends State<MainShellScreen> {
       if (p.id == _activePlantId) return p;
     }
     return null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _initMqtt();
+  }
+
+  void _initMqtt() {
+    final mqtt = MqttService.instance;
+    _mqttStatus = mqtt.currentStatus;
+
+    _mqttStatusSub = mqtt.statusStream.listen((status) {
+      if (!mounted) return;
+      setState(() => _mqttStatus = status);
+      if (status == MqttConnectionStatus.connected) {
+        _showSnack(
+          'Terhubung ke EMQX Cloud',
+          icon: Icons.cloud_done_rounded,
+          iconColor: const Color(0xFF4ADE80),
+        );
+      } else if (status == MqttConnectionStatus.error) {
+        _showSnack(
+          'Gagal terhubung ke MQTT Broker. Ketuk badge untuk coba lagi.',
+          icon: Icons.cloud_off_rounded,
+          iconColor: const Color(0xFFF87171),
+        );
+      }
+    });
+
+    _telemetrySub = mqtt.telemetryStream.listen((telemetry) {
+      if (!mounted) return;
+      setState(() {
+        if (telemetry.temperature != null) _suhu = telemetry.temperature!;
+        if (telemetry.humidity != null) _lembabUdara = telemetry.humidity!;
+        if (telemetry.soilMoisture != null) _lembabTanah = telemetry.soilMoisture!;
+        if (telemetry.lux != null) _lux = telemetry.lux!;
+        if (telemetry.fanRelay != null) _kipasOn = telemetry.fanRelay!;
+        if (telemetry.sprayerRelay != null) _sprayerOn = telemetry.sprayerRelay!;
+        if (telemetry.lamp1Relay != null) _lamp1On = telemetry.lamp1Relay!;
+        if (telemetry.lamp2Relay != null) _lamp2On = telemetry.lamp2Relay!;
+        if (telemetry.mode != null) {
+          _mode = telemetry.mode!.toLowerCase() == 'auto'
+              ? ControlMode.auto
+              : ControlMode.manual;
+        }
+        _lastUpdateTs = formatNowHms();
+      });
+    });
+
+    mqtt.connect();
+  }
+
+  @override
+  void dispose() {
+    _mqttStatusSub?.cancel();
+    _telemetrySub?.cancel();
+    super.dispose();
   }
 
   DateTime? _lastBackPressTime;
@@ -230,24 +294,20 @@ class _MainShellScreenState extends State<MainShellScreen> {
   // SENSOR & CONTROL ACTIONS
   // --------------------------------------------------------------------------
   void _simulateSensorRefresh() {
-    final rng = Random();
-    setState(() {
-      _suhu = double.parse((22 + rng.nextDouble() * 12).toStringAsFixed(1));
-      _lembabUdara = double.parse(
-        (60 + rng.nextDouble() * 28).toStringAsFixed(1),
+    if (_mqttStatus == MqttConnectionStatus.connected) {
+      _showSnack(
+        'Sinkronisasi aktif: data streaming live dari ESP32 via EMQX Cloud',
+        icon: Icons.cloud_sync_rounded,
+        iconColor: const Color(0xFF60A5FA),
       );
-      _lembabTanah = (18 + rng.nextInt(62)).toDouble();
-      _lux = rng.nextDouble() > 0.25
-          ? (800 + rng.nextInt(1100)).toDouble()
-          : rng.nextInt(45).toDouble();
-      _lastUpdateTs = formatNowHms();
-
-      if (_mode == ControlMode.auto) {
-        final p = _activePlant;
-        _kipasOn = p != null && _suhu > p.suhuMax;
-      }
-    });
-    _showSnack('Data sensor MQTT diperbarui');
+    } else {
+      MqttService.instance.connect();
+      _showSnack(
+        'Menghubungkan kembali ke EMQX Cloud...',
+        icon: Icons.sync_rounded,
+        iconColor: const Color(0xFFFBBF24),
+      );
+    }
   }
 
   void _setMode(ControlMode newMode) {
@@ -265,10 +325,16 @@ class _MainShellScreenState extends State<MainShellScreen> {
         }
       }
     });
+
+    final modeStr = newMode == ControlMode.auto ? 'auto' : 'manual';
+    final sent = MqttService.instance.setMode(modeStr);
+
     _showSnack(
       newMode == ControlMode.auto
-          ? 'Mode kontrol diubah ke AUTO'
+          ? 'Mode kontrol diubah ke AUTO${sent ? " (MQTT terkirim)" : ""}'
           : 'Mode Manual aktif: silakan tes aktuator di bawah',
+      icon: newMode == ControlMode.auto ? Icons.auto_mode_rounded : Icons.tune_rounded,
+      iconColor: newMode == ControlMode.auto ? const Color(0xFF4ADE80) : const Color(0xFF60A5FA),
     );
   }
 
@@ -297,7 +363,12 @@ class _MainShellScreenState extends State<MainShellScreen> {
     });
     final p = _activePlant;
     if (p != null) {
-      _showSnack('Tanaman "${p.name}" diaktifkan');
+      final sent = MqttService.instance.setActivePlant(p.name);
+      _showSnack(
+        'Tanaman "${p.name}" diaktifkan${sent ? " (MQTT terkirim)" : ""}',
+        icon: Icons.eco_rounded,
+        iconColor: const Color(0xFF4ADE80),
+      );
     }
   }
 
@@ -341,7 +412,12 @@ class _MainShellScreenState extends State<MainShellScreen> {
       return;
     }
     setState(() => _kipasOn = val);
-    _showSnack('Kipas Pendingin diubah menjadi ${val ? "ON" : "OFF"}');
+    final sent = MqttService.instance.setRelay('fan', val);
+    _showSnack(
+      'Kipas Pendingin diubah menjadi ${val ? "ON" : "OFF"}${sent ? " (MQTT terkirim)" : ""}',
+      icon: Icons.air_rounded,
+      iconColor: val ? const Color(0xFF4ADE80) : const Color(0xFF94A3B8),
+    );
   }
 
   void _onSprayerChanged(bool val) {
@@ -350,7 +426,13 @@ class _MainShellScreenState extends State<MainShellScreen> {
       return;
     }
     setState(() => _sprayerOn = val);
-    _showSnack('Sprayer diubah menjadi ${val ? "ON" : "OFF"}');
+    final dur = _activePlant?.durasiSiram ?? 20;
+    final sent = MqttService.instance.setRelay('sprayer', val, duration: dur);
+    _showSnack(
+      'Sprayer diubah menjadi ${val ? "ON" : "OFF"}${sent ? " (durasi ${dur}d)" : ""}',
+      icon: Icons.water_drop_rounded,
+      iconColor: val ? const Color(0xFF38BDF8) : const Color(0xFF94A3B8),
+    );
   }
 
   void _onMasterLampChanged(bool val) {
@@ -359,7 +441,12 @@ class _MainShellScreenState extends State<MainShellScreen> {
       _lamp1On = val;
       if (!val) _lamp2On = false;
     });
-    _showSnack('Lampu Grow Light diubah menjadi ${val ? "ON" : "OFF"}');
+    final sent = MqttService.instance.setRelay('lamp', val);
+    _showSnack(
+      'Lampu Grow Light diubah menjadi ${val ? "ON" : "OFF"}${sent ? " (MQTT terkirim)" : ""}',
+      icon: Icons.lightbulb_rounded,
+      iconColor: val ? const Color(0xFFFBBF24) : const Color(0xFF94A3B8),
+    );
   }
 
   void _onToggleLamp1() {
@@ -367,8 +454,14 @@ class _MainShellScreenState extends State<MainShellScreen> {
       _showSnack('Tes satuan lampu hanya aktif di Mode MANUAL');
       return;
     }
-    setState(() => _lamp1On = !_lamp1On);
-    _showSnack('Lampu 1 diubah menjadi ${_lamp1On ? "ON" : "OFF"}');
+    final newVal = !_lamp1On;
+    setState(() => _lamp1On = newVal);
+    final sent = MqttService.instance.setRelay('lamp1', newVal);
+    _showSnack(
+      'Lampu 1 diubah menjadi ${newVal ? "ON" : "OFF"}${sent ? " (MQTT terkirim)" : ""}',
+      icon: Icons.lightbulb_outline_rounded,
+      iconColor: newVal ? const Color(0xFFFBBF24) : const Color(0xFF94A3B8),
+    );
   }
 
   void _onToggleLamp2() {
@@ -376,8 +469,112 @@ class _MainShellScreenState extends State<MainShellScreen> {
       _showSnack('Tes satuan lampu hanya aktif di Mode MANUAL');
       return;
     }
-    setState(() => _lamp2On = !_lamp2On);
-    _showSnack('Lampu 2 diubah menjadi ${_lamp2On ? "ON" : "OFF"}');
+    final newVal = !_lamp2On;
+    setState(() => _lamp2On = newVal);
+    final sent = MqttService.instance.setRelay('lamp2', newVal);
+    _showSnack(
+      'Lampu 2 diubah menjadi ${newVal ? "ON" : "OFF"}${sent ? " (MQTT terkirim)" : ""}',
+      icon: Icons.lightbulb_outline_rounded,
+      iconColor: newVal ? const Color(0xFFFBBF24) : const Color(0xFF94A3B8),
+    );
+  }
+
+  void _showMqttDetailsDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        titlePadding: const EdgeInsets.fromLTRB(22, 22, 22, 12),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 22, vertical: 8),
+        actionsPadding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+        title: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: AppColors.primaryContainer,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(
+                Icons.cloud_sync_rounded,
+                color: AppColors.primary,
+                size: 20,
+              ),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Status EMQX Cloud',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildMqttInfoTile('Broker Host', MqttService.brokerHost),
+            const SizedBox(height: 8),
+            _buildMqttInfoTile('Port', '8883 (Mobile SSL) / 8084 (Web WSS)'),
+            const SizedBox(height: 8),
+            _buildMqttInfoTile('Koneksi', _mqttStatus == MqttConnectionStatus.connected
+                ? 'Terhubung (Online)'
+                : _mqttStatus == MqttConnectionStatus.connecting
+                    ? 'Sedang Menghubungkan...'
+                    : 'Terputus (Offline)'),
+            const SizedBox(height: 8),
+            _buildMqttInfoTile('Pembaruan Terakhir', _lastUpdateTs),
+            const SizedBox(height: 8),
+            _buildMqttInfoTile('Topic Telemetri', MqttService.topicTelemetry),
+          ],
+        ),
+        actions: [
+          OutlinedButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Tutup'),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              MqttService.instance.connect();
+            },
+            icon: const Icon(Icons.refresh_rounded, size: 16),
+            label: const Text('Hubungkan Ulang'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMqttInfoTile(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: AppColors.textSecondary,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            color: AppColors.textPrimary,
+          ),
+        ),
+      ],
+    );
   }
 
   @override
@@ -447,29 +644,71 @@ class _MainShellScreenState extends State<MainShellScreen> {
             ],
           ),
           actions: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-              decoration: BoxDecoration(
-                color: AppColors.primaryContainer,
-                borderRadius: BorderRadius.circular(999),
-                border: Border.all(
-                  color: AppColors.primary.withValues(alpha: 0.18),
-                ),
-              ),
-              child: const Row(
-                children: [
-                  CircleAvatar(radius: 3.5, backgroundColor: AppColors.primary),
-                  SizedBox(width: 5),
-                  Text(
-                    'MQTT: Online',
-                    style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.onPrimaryContainer,
+            Builder(
+              builder: (context) {
+                Color badgeBg;
+                Color badgeBorder;
+                Color badgeDot;
+                Color badgeFg;
+                String badgeText;
+
+                switch (_mqttStatus) {
+                  case MqttConnectionStatus.connected:
+                    badgeBg = AppColors.primaryContainer;
+                    badgeBorder = AppColors.primary.withValues(alpha: 0.18);
+                    badgeDot = AppColors.primary;
+                    badgeFg = AppColors.onPrimaryContainer;
+                    badgeText = 'MQTT: Online';
+                    break;
+                  case MqttConnectionStatus.connecting:
+                    badgeBg = const Color(0xFFFEF3C7);
+                    badgeBorder =
+                        const Color(0xFFF59E0B).withValues(alpha: 0.3);
+                    badgeDot = const Color(0xFFF59E0B);
+                    badgeFg = const Color(0xFF92400E);
+                    badgeText = 'MQTT: Hubung...';
+                    break;
+                  case MqttConnectionStatus.disconnected:
+                  case MqttConnectionStatus.error:
+                    badgeBg = const Color(0xFFF1F5F9);
+                    badgeBorder =
+                        const Color(0xFF94A3B8).withValues(alpha: 0.3);
+                    badgeDot = const Color(0xFF94A3B8);
+                    badgeFg = const Color(0xFF475569);
+                    badgeText = 'MQTT: Offline';
+                    break;
+                }
+
+                return InkWell(
+                  onTap: _showMqttDetailsDialog,
+                  borderRadius: BorderRadius.circular(999),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: badgeBg,
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(color: badgeBorder),
+                    ),
+                    child: Row(
+                      children: [
+                        CircleAvatar(radius: 3.5, backgroundColor: badgeDot),
+                        const SizedBox(width: 5),
+                        Text(
+                          badgeText,
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w700,
+                            color: badgeFg,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                ],
-              ),
+                );
+              },
             ),
             const SizedBox(width: 6),
             IconButton(

@@ -322,6 +322,26 @@ void setup() {
 
   // Inisialisasi I2C LCD di pin 25 (SDA) dan pin 26 (SCL)
   Wire.begin(LCD_SDA_PIN, LCD_SCL_PIN);
+  delay(50);
+
+  // Scanner otomatis alamat I2C di Serial Monitor
+  Serial.println("[I2C SCANNER] Memindai bus I2C pada SDA=GPIO 25 & SCL=GPIO 26...");
+  byte foundCount = 0;
+  for (byte addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("[I2C SCANNER] >> Ditemukan perangkat I2C di alamat: 0x%02X\n", addr);
+      foundCount++;
+    }
+  }
+
+  if (foundCount == 0) {
+    Serial.println("[I2C SCANNER] PERINGATAN: Tidak ada modul I2C yang terdeteksi!");
+    Serial.println("  -> Cek kabel SDA ke GPIO 25 dan SCL ke GPIO 26 (jangan terbalik)");
+    Serial.println("  -> Cek VCC modul LCD terhubung ke 5V / VIN (BUKAN 3.3V)");
+    Serial.println("  -> Pastikan GND terhubung ke GND ESP32");
+  }
+
   lcd.init();
   lcd.backlight();
   lcd.clear();
