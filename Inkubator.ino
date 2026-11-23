@@ -765,8 +765,8 @@ String lcdDateNow() {
   return String(buf);
 }
 
-void lcdBootScreen(const String &l1, const String &l2 = "",
-                   const String &l3 = "", const String &l4 = "") {
+void lcdBootScreen(const String &l1, const String &l2,
+                   const String &l3, const String &l4) {
   if (!lcdAvailable) return;
   lcd.setCursor(0,0); lcd.print(lcdPad(l1));
   if (l2.length()) { lcd.setCursor(0,1); lcd.print(lcdPad(l2)); }
