@@ -187,11 +187,35 @@ bool etiolasiOverride = false;
 // Relay Module: Active LOW (LOW = ON, HIGH = OFF)
 #define RELAY_ACTIVE_LOW 1
 
-#define LCD_I2C_SDA_PIN 32
-#define LCD_I2C_SCL_PIN 33
-#define LCD_I2C_ADDR    0x27
-#define LCD_COLS        20
-#define LCD_ROWS        4
+/* ================= DISPLAY CONFIGURATION (I2C LCD vs TFT SERIAL) ================= */
+// Pin Display di header yang sama (GPIO 32 & GPIO 33):
+// Jika mode I2C LCD   : GPIO 32 = SDA, GPIO 33 = SCL
+// Jika mode TFT Serial: GPIO 32 = RXD, GPIO 33 = TXD (Hubungkan TXD GPIO 33 ke RXD2 GPIO 25 pada ESP32 TFT)
+#define DISPLAY_PIN_RX_SDA  32
+#define DISPLAY_PIN_TX_SCL  33
+
+#define LCD_I2C_SDA_PIN     DISPLAY_PIN_RX_SDA
+#define LCD_I2C_SCL_PIN     DISPLAY_PIN_TX_SCL
+#define LCD_I2C_ADDR        0x27
+#define LCD_COLS            20
+#define LCD_ROWS            4
+
+#define TFT_SERIAL_RX_PIN   DISPLAY_PIN_RX_SDA
+#define TFT_SERIAL_TX_PIN   DISPLAY_PIN_TX_SCL
+#define TFT_SERIAL_BAUD     9600
+
+// Opsi Mode Display:
+// 0 = AUTO_DETECT (Cek apakah ada I2C LCD di pin 32 & 33. Jika ada, pakai LCD I2C. Jika tidak ada, otomatis aktifkan TFT Serial!)
+// 1 = TFT_SERIAL_ONLY (Paksa pin 32/33 sebagai UART Serial2 untuk LCD TFT)
+// 2 = I2C_LCD_ONLY (Paksa pin 32/33 sebagai I2C untuk LCD 20x4)
+// 3 = DUAL_DISPLAY (LCD I2C aktif di pin 32/33 DAN TFT Serial aktif di pin cadangan misal TX=GPIO 23)
+#define DISPLAY_MODE_AUTO   0
+#define DISPLAY_MODE_TFT    1
+#define DISPLAY_MODE_I2C    2
+#define DISPLAY_MODE_DUAL   3
+
+#define DISPLAY_CONFIG      DISPLAY_MODE_AUTO // Default: Otomatis mendeteksi keberadaan LCD I2C
+#define DUAL_TFT_TX_PIN     23                // Khusus jika memilih DISPLAY_MODE_DUAL (keduanya aktif bersamaan)
 
 /* ================= CONSTANTS ================= */
 #define MAX_SCHEDULE 10
@@ -205,9 +229,9 @@ const int    SOIL_ADC_WET_VALUE   = 1400;
 
 // ── Konversi crisp pompa → durasi semprot (detik) ──────────────
 // Sesuaikan durasi jika perlu, misalnya tray 72 titik butuh lebih lama
-const int SPRAY_SINGKAT_S  =  5;   // R2 fallback, tanah agak kering + suhu dingin
-const int SPRAY_SEDANG_S   = 15;   // tanah kering + suhu normal
-const int SPRAY_PANJANG_S  = 30;   // tanah kering + suhu panas (kondisi kritis)
+const int SPRAY_SINGKAT_S  = 2;   // R2 fallback, tanah agak kering + suhu dingin
+const int SPRAY_SEDANG_S   = 4;   // tanah kering + suhu normal
+const int SPRAY_PANJANG_S  = 6;   // tanah kering + suhu panas (kondisi kritis)
 
 // Cooldown sprayer setelah penyiraman otomatis (mencegah banjir)
 // Cooldown sprayer setelah penyiraman otomatis (mencegah overwatering & memberi waktu air meresap)
@@ -257,6 +281,8 @@ bool  soilMoistureDigitalWet = false;
 float luxValue               = -1.0f;
 bool  luxAvailable           = false;
 bool  rtcAvailable           = false;
+bool  lcdAvailable           = false;
+bool  tftSerialAvailable     = false;
 
 bool lampRelayOn   = false;
 bool fanRelayOn    = false;
@@ -334,6 +360,8 @@ int  readSoilMoisturePercent(int rawValue);
 bool readSoilMoistureDigitalWet();
 void updateLcd();
 void recoverLcd();
+void initDisplaySubsystem();
+void sendDataToTft();
 bool initLuxSensor();
 float readLuxSensor();
 bool syncTimeFromRtc();
@@ -704,12 +732,13 @@ void handleSerialCommands() {
 
 /* ================= LCD RECOVERY & HELPERS ================= */
 void recoverLcd() {
+  if (!lcdAvailable) return;
   Serial.println("[LCD] Melakukan recovery & reset HD44780 controller...");
   Wire.begin(LCD_I2C_SDA_PIN, LCD_I2C_SCL_PIN);
   delay(20);
   lcd.init();
   lcd.backlight();
-  lcd.clear();
+  if (lcdAvailable) lcd.clear();
 }
 
 String lcdPad(String text) {
@@ -736,15 +765,17 @@ String lcdDateNow() {
   return String(buf);
 }
 
-void lcdBootScreen(const String &l1, const String &l2,
-                   const String &l3, const String &l4) {
+void lcdBootScreen(const String &l1, const String &l2 = "",
+                   const String &l3 = "", const String &l4 = "") {
+  if (!lcdAvailable) return;
   lcd.setCursor(0,0); lcd.print(lcdPad(l1));
-  lcd.setCursor(0,1); lcd.print(lcdPad(l2));
-  lcd.setCursor(0,2); lcd.print(lcdPad(l3));
-  lcd.setCursor(0,3); lcd.print(lcdPad(l4));
+  if (l2.length()) { lcd.setCursor(0,1); lcd.print(lcdPad(l2)); }
+  if (l3.length()) { lcd.setCursor(0,2); lcd.print(lcdPad(l3)); }
+  if (l4.length()) { lcd.setCursor(0,3); lcd.print(lcdPad(l4)); }
 }
 
 void updateLcd() {
+  if (!lcdAvailable) return;
   // Cek apakah I2C LCD merespons atau bus error (terkena glitch/EMI relay)
   Wire.beginTransmission(LCD_I2C_ADDR);
   if (Wire.endTransmission() != 0) {
@@ -828,6 +859,103 @@ String buildPhaseBadge() {
   if (phaseLength <= 0 || phaseDay <= 0) return "";
   int rem = constrain(phaseLength - phaseDay + 1, 0, 999);
   return (inLight ? "TRG " : "GLP ") + String(rem);
+}
+
+/* ================= TFT SERIAL TRANSMITTER ================= */
+void sendDataToTft() {
+  if (!tftSerialAvailable) return;
+
+  float s  = isnan(temperature) ? 0.0f : temperature;
+  float ku = isnan(humidity) ? 0.0f : humidity;
+  int   kt = (soilMoisturePercent < 0) ? 0 : constrain(soilMoisturePercent, 0, 100);
+  int   lx = (luxValue < 0.0f) ? 0 : (int)luxValue;
+  int   md = (mode == "auto") ? 1 : 0;
+  int   kp = fanRelayOn ? 1 : 0;
+  int   sp = sprayerActive ? 1 : 0;
+  int   lp = lampRelayOn ? 1 : 0;
+
+  // Format CSV persis sesuai sscanf di penerima TFT:
+  // sscanf(masuk.c_str(), "%f,%f,%d,%d,%d,%d,%d,%d", &s, &ku, &kt, &lx, &md, &kp, &sp, &lp) == 8
+  Serial2.printf("%.1f,%.1f,%d,%d,%d,%d,%d,%d\n", s, ku, kt, lx, md, kp, sp, lp);
+}
+
+/* ================= DISPLAY SUBSYSTEM INIT ================= */
+void initDisplaySubsystem() {
+#if (DISPLAY_CONFIG == DISPLAY_MODE_TFT)
+  // Mode Paksa TFT Serial pada GPIO 32 (RX) dan GPIO 33 (TX)
+  lcdAvailable = false;
+  tftSerialAvailable = true;
+  Serial2.begin(TFT_SERIAL_BAUD, SERIAL_8N1, TFT_SERIAL_RX_PIN, TFT_SERIAL_TX_PIN);
+  Serial.printf("[DISPLAY] Mode TFT SERIAL aktif di RX=%d & TX=%d (Baud: %d)\n",
+    TFT_SERIAL_RX_PIN, TFT_SERIAL_TX_PIN, TFT_SERIAL_BAUD);
+
+#elif (DISPLAY_CONFIG == DISPLAY_MODE_I2C)
+  // Mode Paksa LCD I2C 20x4 pada GPIO 32 (SDA) dan GPIO 33 (SCL)
+  Wire.begin(LCD_I2C_SDA_PIN, LCD_I2C_SCL_PIN);
+  delay(50);
+  lcd.init();
+  lcd.backlight();
+  if (lcdAvailable) lcd.clear();
+  lcdAvailable = true;
+  tftSerialAvailable = false;
+  Serial.printf("[DISPLAY] Mode I2C LCD aktif di SDA=%d & SCL=%d (Addr: 0x%02X)\n",
+    LCD_I2C_SDA_PIN, LCD_I2C_SCL_PIN, LCD_I2C_ADDR);
+
+#elif (DISPLAY_CONFIG == DISPLAY_MODE_DUAL)
+  // Mode Dual: LCD I2C di pin 32/33 DAN TFT Serial di pin lain (DUAL_TFT_TX_PIN)
+  Wire.begin(LCD_I2C_SDA_PIN, LCD_I2C_SCL_PIN);
+  delay(50);
+  lcd.init();
+  lcd.backlight();
+  if (lcdAvailable) lcd.clear();
+  lcdAvailable = true;
+  tftSerialAvailable = true;
+  Serial2.begin(TFT_SERIAL_BAUD, SERIAL_8N1, -1, DUAL_TFT_TX_PIN);
+  Serial.printf("[DISPLAY] DUAL DISPLAY AKTIF! LCD I2C di SDA=%d/SCL=%d & TFT Serial di TX=%d\n",
+    LCD_I2C_SDA_PIN, LCD_I2C_SCL_PIN, DUAL_TFT_TX_PIN);
+
+#else // DISPLAY_MODE_AUTO (Deteksi Otomatis keberadaan LCD I2C)
+  Serial.println("[DISPLAY] Memindai bus I2C pada pin 32 & 33...");
+  Wire.begin(LCD_I2C_SDA_PIN, LCD_I2C_SCL_PIN);
+  Wire.setTimeOut(60);
+  delay(30);
+
+  bool foundI2c = false;
+  byte testAddrs[] = {LCD_I2C_ADDR, 0x3F, 0x26, 0x38};
+  for (byte addr : testAddrs) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      foundI2c = true;
+      Serial.printf("[DISPLAY] LCD I2C terdeteksi di alamat: 0x%02X!\n", addr);
+      break;
+    }
+  }
+
+  if (foundI2c) {
+    lcdAvailable = true;
+    tftSerialAvailable = false;
+    lcd.init();
+    lcd.backlight();
+    if (lcdAvailable) lcd.clear();
+    Serial.println("[DISPLAY] LCD I2C 20x4 terpasang & aktif.");
+  } else {
+    // LCD I2C tidak terdeteksi -> alihkan pin 32 & 33 menjadi UART Serial2 untuk TFT!
+    Wire.end();
+    delay(20);
+    lcdAvailable = false;
+    tftSerialAvailable = true;
+    Serial2.begin(TFT_SERIAL_BAUD, SERIAL_8N1, TFT_SERIAL_RX_PIN, TFT_SERIAL_TX_PIN);
+    Serial.printf("[DISPLAY] LCD I2C tidak terpasang. Otomatis mengaktifkan TFT Serial pada RX=%d, TX=%d (Baud: %d)\n",
+      TFT_SERIAL_RX_PIN, TFT_SERIAL_TX_PIN, TFT_SERIAL_BAUD);
+  }
+#endif
+
+  if (lcdAvailable) {
+    lcd.setCursor(0,0); lcd.print(lcdPad("INKUBATOR SMART"));
+    lcd.setCursor(0,1); lcd.print(lcdPad("Mode: " + mode));
+    lcd.setCursor(0,2); lcd.print(lcdPad("Plt : " + activePlantName));
+    lcd.setCursor(0,3); lcd.print(lcdPad("PT PETROKIMIA GRESIK"));
+  }
 }
 
 /* ================= RELAY ================= */
@@ -1078,6 +1206,7 @@ void publishTelemetry() {
   }
   if (!has) return;
   publishJson(topicTelemetry, doc);
+  if (tftSerialAvailable) sendDataToTft();
 }
 
 void publishStatus() {
@@ -1115,6 +1244,7 @@ void publishStatus() {
   time_t e = time(nullptr);
   if (e>100000) doc["last_seen"] = (long)e;
   publishJson(topicStatus, doc);
+  if (tftSerialAvailable) sendDataToTft();
 }
 
 void publishAlert(const char *type, int duration = 0, const char *msg = nullptr) {
@@ -1721,7 +1851,7 @@ void connectWiFiBoot() {
     lcdBootScreen("WIFI OFFLINE", "Mode Mandiri Aktif", "RTC & Jadwal Jalan", "");
     delay(1200);
   }
-  lcd.clear();
+  if (lcdAvailable) lcd.clear();
 }
 
 void connectMqttCloud() {
@@ -1809,16 +1939,8 @@ void setup() {
   autoSoilGraceUntilMs = bootMs + AUTO_SOIL_GRACE_MS; // Grace period 60 detik (tunggu pembacaan tanah stabil)
   lastSprayerTriggerMinute = nowMinuteKey();        // Cegah eksekusi jadwal pada menit boot
 
-  // 1. Inisialisasi I2C Bus Primer (LCD 20x4 / 16x2) di GPIO 32 (SDA) & 33 (SCL)
-  Wire.begin(LCD_I2C_SDA_PIN, LCD_I2C_SCL_PIN);
-  delay(50);
-  lcd.init(); 
-  lcd.backlight(); 
-  lcd.clear();
-  lcd.setCursor(0,0); lcd.print(lcdPad("INKUBATOR SMART"));
-  lcd.setCursor(0,1); lcd.print(lcdPad("Mode: " + mode));
-  lcd.setCursor(0,2); lcd.print(lcdPad("Plt : " + activePlantName));
-  lcd.setCursor(0,3); lcd.print(lcdPad("PT PETROKIMIA GRESIK"));
+  // 1. Inisialisasi Subsystem Display (Auto Detect LCD I2C 20x4 vs TFT Serial pada pin 32 & 33)
+  initDisplaySubsystem();
 
   // 2. Inisialisasi I2C Bus Sekunder (RTC DS3231) di GPIO 27 (SDA) & 14 (SCL)
   Wire1.begin(RTC_I2C_SDA_PIN, RTC_I2C_SCL_PIN);
@@ -2003,10 +2125,15 @@ void loop() {
       lampRelayOn?"ON":"OFF", fanRelayOn?"ON":"OFF", sprayerActive?"YES":"NO");
   }
 
-  // 10) LCD refresh (tiap 1 detik)
+  // 10) Refresh Display LCD 20x4 / TFT Serial (tiap 1 detik)
   if (now-lastLcdUpdate>=LCD_UPDATE_INTERVAL) { 
     lastLcdUpdate=now; 
-    updateLcd(); 
+    if (lcdAvailable) {
+      updateLcd(); 
+    }
+    if (tftSerialAvailable) {
+      sendDataToTft();
+    }
   }
 
   // 11) Resync jam internal ESP32 dari RTC DS3231 tiap 10 menit (mencegah drift kristal)
