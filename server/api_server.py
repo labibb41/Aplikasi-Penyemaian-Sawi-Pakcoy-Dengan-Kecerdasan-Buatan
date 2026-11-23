@@ -556,11 +556,11 @@ async def predict_side_view(file: UploadFile = File(...), tray_width_cm: float =
             by = int(baseline_y)
             x_start = int(tray_box[0])
             x_end = int(tray_box[2])
-            # Garis horizontal batas tray
-            cv2.line(vis_bgr, (x_start, by), (x_end, by), (255, 200, 0), 2, cv2.LINE_AA)
+            # Garis horizontal batas tray (Merah)
+            cv2.line(vis_bgr, (x_start, by), (x_end, by), (0, 0, 255), 2, cv2.LINE_AA)
             # Label teks di bawah garis agar tidak menabrak kotak tanaman
             cv2.putText(vis_bgr, "--- BATAS TRAY (0 cm) ---", (x_start + 6, min(h_img - 6, by + 16)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 200, 0), 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 255), 1, cv2.LINE_AA)
 
         tanaman_list = sorted(tanaman_list, key=lambda t: t["box"][0])
         results_detail = []
