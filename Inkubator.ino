@@ -1252,7 +1252,7 @@ void publishStatus() {
   if (tftSerialAvailable) sendDataToTft();
 }
 
-void publishAlert(const char *type, int duration = 0, const char *msg = nullptr) {
+void publishAlert(const char *type, int duration, const char *msg) {
   StaticJsonDocument<384> doc;
   doc["type"]        = type;
   if (msg) doc["message"] = msg;
