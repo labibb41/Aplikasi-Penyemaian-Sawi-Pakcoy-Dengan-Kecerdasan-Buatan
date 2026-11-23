@@ -551,8 +551,10 @@ async def predict_side_view(file: UploadFile = File(...), tray_width_cm: float =
 
         vis_bgr = img_bgr.copy()
 
-        # Gambar 1 Garis Acuan Tunggal Tray Bawah (Garis Baseline 0 cm)
-        if tray_box is not None:
+        # Garis acuan tray bawah (disembunyikan agar tampilan hasil analisa lebih bersih dan fokus pada tanaman)
+        # AI tetap menggunakan tray_box di latar belakang untuk kalibrasi tinggi cm yang akurat.
+        show_tray_line = False
+        if show_tray_line and tray_box is not None:
             by = int(baseline_y)
             x_start = int(tray_box[0])
             x_end = int(tray_box[2])
