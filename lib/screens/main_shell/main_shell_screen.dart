@@ -363,9 +363,23 @@ class _MainShellScreenState extends State<MainShellScreen> {
     });
     final p = _activePlant;
     if (p != null) {
-      final sent = MqttService.instance.setActivePlant(p.name);
+      final lampsCount = p.jumlahLampu.startsWith('2') ? 2 : 1;
+      final sent = MqttService.instance.syncPlantProfile(
+        name: p.name,
+        suhuMax: p.suhuMax,
+        jamMulai: p.jamMulai,
+        jamSelesai: p.jamSelesai,
+        jamMulaiH1: p.jamMulaiH1,
+        masaGelap: p.masaGelap,
+        masaTerang: p.masaTerang,
+        tglMulai: p.tglMulai,
+        faseAwal: p.faseAwal,
+        autoLampsCount: lampsCount,
+        jamSiram: p.jamSiram,
+        durasiSiram: p.durasiSiram,
+      );
       _showSnack(
-        'Tanaman "${p.name}" diaktifkan${sent ? " (MQTT terkirim)" : ""}',
+        'Tanaman "${p.name}" diaktifkan & disinkronkan ke ESP32${sent ? " (MQTT terkirim)" : ""}',
         icon: Icons.eco_rounded,
         iconColor: const Color(0xFF4ADE80),
       );
@@ -399,9 +413,28 @@ class _MainShellScreenState extends State<MainShellScreen> {
         _plants.insert(0, result);
       }
     });
+
+    if (existing != null && _activePlantId == result.id) {
+      final lampsCount = result.jumlahLampu.startsWith('2') ? 2 : 1;
+      MqttService.instance.syncPlantProfile(
+        name: result.name,
+        suhuMax: result.suhuMax,
+        jamMulai: result.jamMulai,
+        jamSelesai: result.jamSelesai,
+        jamMulaiH1: result.jamMulaiH1,
+        masaGelap: result.masaGelap,
+        masaTerang: result.masaTerang,
+        tglMulai: result.tglMulai,
+        faseAwal: result.faseAwal,
+        autoLampsCount: lampsCount,
+        jamSiram: result.jamSiram,
+        durasiSiram: result.durasiSiram,
+      );
+    }
+
     _showSnack(
       existing != null
-          ? 'Profil "${result.name}" diperbarui'
+          ? 'Profil "${result.name}" diperbarui & disinkronkan'
           : 'Profil "${result.name}" ditambahkan',
     );
   }

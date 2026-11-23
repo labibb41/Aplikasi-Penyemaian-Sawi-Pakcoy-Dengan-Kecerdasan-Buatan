@@ -276,7 +276,7 @@ String        lastSprayerTriggerMinute = "";
 // Proteksi Fail-Safe Sensor Tanah (Tanpa batasan slot waktu):
 // 1) Deteksi kabel lepas / korslet (ADC out of range: raw < 100 atau raw > 4050)
 // 2) Deteksi sensor macet / probe tercabut (maksimal 3x semprot berturut-turut jika tanah tetap kering)
-const int MAX_CONSECUTIVE_SPRAYS = 3;     // Maksimal 3x semprot berturut-turut tanpa kenaikan kelembaban
+const int MAX_CONSECUTIVE_SPRAYS = 1;     // Maksimal 3x semprot berturut-turut tanpa kenaikan kelembaban
 int       consecutiveSoilSprays  = 0;     // Counter semprot berturut-turut
 bool      soilSensorFaultLocked  = false; // Terkunci jika 3x semprot berturut-turut tapi sensor tidak naik
 bool      soilSensorNotified     = false;

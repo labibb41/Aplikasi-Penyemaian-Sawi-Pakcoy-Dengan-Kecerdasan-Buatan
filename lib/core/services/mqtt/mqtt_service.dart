@@ -314,6 +314,47 @@ class MqttService {
     });
   }
 
+  bool syncPlantProfile({
+    required String name,
+    required double suhuMax,
+    required String jamMulai,
+    required String jamSelesai,
+    required String jamMulaiH1,
+    required int masaGelap,
+    required int masaTerang,
+    required DateTime tglMulai,
+    required String faseAwal,
+    required int autoLampsCount,
+    required List<String> jamSiram,
+    required int durasiSiram,
+  }) {
+    final y = tglMulai.year;
+    final m = tglMulai.month.toString().padLeft(2, '0');
+    final d = tglMulai.day.toString().padLeft(2, '0');
+    final startDateStr = '$y-$m-$d';
+    final phaseStr =
+        faseAwal.toLowerCase().contains('terang') ? 'light' : 'dark';
+
+    return publishRawCommand({
+      'type': 'set_active_plant',
+      'value': {
+        'id': name.toLowerCase().replaceAll(' ', '_'),
+        'name': name,
+        'temp_optimal_max': suhuMax,
+        'lighting_start': jamMulai,
+        'lighting_end': jamSelesai,
+        'lighting_first_day_start': jamMulaiH1,
+        'dark_days': masaGelap,
+        'light_days': masaTerang,
+        'cycle_start_date': startDateStr,
+        'cycle_start_phase': phaseStr,
+        'auto_lamps_count': autoLampsCount,
+        'watering_times': jamSiram,
+        'watering_duration': durasiSiram,
+      },
+    });
+  }
+
   bool setSprayerDuration(int seconds) {
     return publishRawCommand({
       'type': 'set_sprayer_duration',
