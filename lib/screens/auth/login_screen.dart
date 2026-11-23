@@ -52,15 +52,6 @@ class _LoginScreenState extends State<LoginScreen> {
                     color: AppColors.textPrimary,
                   ),
                 ),
-                SizedBox(height: 4),
-                Text(
-                  'Menghubungkan ke Broker MQTT...',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: AppColors.textSecondary,
-                  ),
-                ),
               ],
             ),
           ),

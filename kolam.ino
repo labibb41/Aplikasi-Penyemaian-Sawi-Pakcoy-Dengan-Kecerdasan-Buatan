@@ -320,13 +320,26 @@ void setup() {
   Serial.println("Ketik '2' di Serial Monitor untuk Toggle Manual Pompa 2\n");
 
 
+  // Inisialisasi I2C LCD di pin 25 (SDA) dan pin 26 (SCL)
+  Wire.begin(LCD_SDA_PIN, LCD_SCL_PIN);
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(" CekTandon v2.0 ");
+  lcd.setCursor(0, 1);
+  lcd.print(" Inisialisasi...");
+
   // Inisialisasi Pin Ultrasonik
   pinMode(TRIG1, OUTPUT);
   pinMode(ECHO1, INPUT);
-  pinMode(TRIG2, OUTPUT);
-  pinMode(ECHO2, INPUT);
   digitalWrite(TRIG1, LOW);
-  digitalWrite(TRIG2, LOW);
+
+  if (TRIG2 >= 0 && ECHO2 >= 0) {
+    pinMode(TRIG2, OUTPUT);
+    pinMode(ECHO2, INPUT);
+    digitalWrite(TRIG2, LOW);
+  }
 
 
   // Inisialisasi Pin Relay Pompa
@@ -367,10 +380,10 @@ void loop() {
     lastSend = millis();
 
 
-    // Baca kedua sensor ultrasonik secara bergantian
+    // Baca sensor ultrasonik
     float jarak1 = bacaJarak(TRIG1, ECHO1);
     delay(40); // Jeda mencegah tabrakan pantulan akustik
-    float jarak2 = bacaJarak(TRIG2, ECHO2);
+    float jarak2 = (TRIG2 >= 0 && ECHO2 >= 0) ? bacaJarak(TRIG2, ECHO2) : -1;
 
 
     // Dual Sensor Redundancy
@@ -488,9 +501,15 @@ void loop() {
                       pump1State ? "ON" : "OFF", pump2State ? "ON" : "OFF");
       }
 
+      // Update Tampilan LCD I2C (Pin 25 SDA & Pin 26 SCL)
+      updateLCD(persen, liter, levelStatus, pump1State, pump2State, mqttClient.connected());
 
     } else {
       Serial.println("[PERINGATAN] Sensor gagal membaca pantulan ultrasonik!");
+      lcd.setCursor(0, 0);
+      lcd.print("  Sensor Error! ");
+      lcd.setCursor(0, 1);
+      lcd.print(" Cek Ultrasonik ");
     }
   }
 }
