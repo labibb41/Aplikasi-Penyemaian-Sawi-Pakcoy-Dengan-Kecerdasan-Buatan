@@ -161,7 +161,7 @@ class MqttService {
       final client = createMqttClient(brokerHost, clientId, port);
       _client = client;
 
-      client.logging(on: false);
+      client.logging(on: true);
       client.keepAlivePeriod = 60;
       client.autoReconnect = true;
       client.resubscribeOnAutoReconnect = true;
@@ -169,8 +169,8 @@ class MqttService {
       final connMessage = MqttConnectMessage()
           .withClientIdentifier(clientId)
           .authenticateAs(brokerUser, brokerPass)
-          .startClean()
-          .withWillQos(MqttQos.atLeastOnce);
+          .startClean();
+          
 
       client.connectionMessage = connMessage;
 
@@ -195,7 +195,7 @@ class MqttService {
         _setStatus(MqttConnectionStatus.connected);
       };
 
-      final connStatus = await client.connect();
+      final connStatus = await client.connect(brokerUser, brokerPass);
 
       if (connStatus?.state == MqttConnectionState.connected) {
         _setStatus(MqttConnectionStatus.connected);

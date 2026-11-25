@@ -5,5 +5,6 @@ MqttClient createMqttClient(String server, String clientId, int port) {
   final client = MqttServerClient.withPort(server, clientId, port);
   client.secure = true;
   client.onBadCertificate = (dynamic cert) => true;
+  client.setProtocolV311();
   return client;
 }

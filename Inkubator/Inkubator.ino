@@ -374,8 +374,7 @@ void handleSerialCommands();
 void processSerialCommand(String cmd);
 String buildPhaseBadge();
 bool isLightPhaseToday(int &phaseDay, int &phaseLength, String &phaseName);
-void lcdBootScreen(const String &l1, const String &l2 = "",
-                   const String &l3 = "", const String &l4 = "");
+
 void saveConfig();
 void loadConfig();
 void startSprayerCountdown(int duration);
@@ -772,6 +771,9 @@ String lcdDateNow() {
 
 void lcdBootScreen(const String &l1, const String &l2,
                    const String &l3, const String &l4) {
+  if (tftSerialAvailable) {
+    Serial2.printf("BOOT|%s|%s|%s|%s\n", l1.c_str(), l2.c_str(), l3.c_str(), l4.c_str());
+  }
   if (!lcdAvailable) return;
   lcd.setCursor(0,0); lcd.print(lcdPad(l1));
   if (l2.length()) { lcd.setCursor(0,1); lcd.print(lcdPad(l2)); }
@@ -866,7 +868,6 @@ String buildPhaseBadge() {
   return (inLight ? "TRG " : "GLP ") + String(rem);
 }
 
-/* ================= TFT SERIAL TRANSMITTER ================= */
 void sendDataToTft() {
   if (!tftSerialAvailable) return;
 
@@ -878,11 +879,18 @@ void sendDataToTft() {
   int   kp = fanRelayOn ? 1 : 0;
   int   sp = sprayerActive ? 1 : 0;
   int   lp = lampRelayOn ? 1 : 0;
+  int   wf = (WiFi.status() == WL_CONNECTED) ? 1 : 0;
+  String jam  = lcdTimeNow();
+  String plt  = activePlantName.length() > 0 ? activePlantName : "Pakcoy";
+  String fase = buildPhaseBadge();
+  if (fase.length() == 0) fase = "-";
 
+  Serial2.printf("DATA,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%s,%d,%s,%s\n",
+                 s, ku, kt, lx, md, kp, sp, lp, jam.c_str(), wf, plt.c_str(), fase.c_str());
+}
   // Format CSV persis sesuai sscanf di penerima TFT:
   // sscanf(masuk.c_str(), "%f,%f,%d,%d,%d,%d,%d,%d", &s, &ku, &kt, &lx, &md, &kp, &sp, &lp) == 8
-  Serial2.printf("%.1f,%.1f,%d,%d,%d,%d,%d,%d\n", s, ku, kt, lx, md, kp, sp, lp);
-}
+
 
 /* ================= DISPLAY SUBSYSTEM INIT ================= */
 void initDisplaySubsystem() {

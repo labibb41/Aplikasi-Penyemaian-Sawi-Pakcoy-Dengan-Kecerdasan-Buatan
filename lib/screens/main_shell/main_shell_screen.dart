@@ -9,11 +9,14 @@ import '../../core/utils/date_formatter.dart';
 import '../../core/utils/snackbar_utils.dart';
 import '../../models/control_mode.dart';
 import '../../models/plant_profile.dart';
+import '../../core/services/notification_service.dart';
 import '../auth/login_screen.dart';
 import 'dialogs/plant_form_dialog.dart';
 import 'tabs/etiolasi_tab.dart';
 import 'tabs/monitoring_tab.dart';
 import 'tabs/tanaman_tab.dart';
+import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class MainShellScreen extends StatefulWidget {
   const MainShellScreen({super.key});
@@ -37,6 +40,74 @@ class _MainShellScreenState extends State<MainShellScreen> {
   bool _sprayerOn = false;
   bool _lamp1On = true;
   bool _lamp2On = false;
+  bool _hasInitialTelemetry = false;
+
+
+Future<void> _savePlants() async {
+  final prefs = await SharedPreferences.getInstance();
+  final encoded = jsonEncode(_plants.map((p) => {
+    'id': p.id,
+    'name': p.name,
+    'suhuMin': p.suhuMin,
+    'suhuMax': p.suhuMax,
+    'durasiSiram': p.durasiSiram,
+    'autoAktif': p.autoAktif,
+    'jamSiram': p.jamSiram,
+    'masaGelap': p.masaGelap,
+    'masaTerang': p.masaTerang,
+    'tglMulai': p.tglMulai.toIso8601String(),
+    'faseAwal': p.faseAwal,
+    'jamMulai': p.jamMulai,
+    'jamSelesai': p.jamSelesai,
+    'jamMulaiH1': p.jamMulaiH1,
+    'jumlahLampu': p.jumlahLampu,
+  }).toList());
+  await prefs.setString('saved_plants', encoded);
+  if (_activePlantId != null) {
+    await prefs.setInt('active_plant_id', _activePlantId!);
+  } else {
+    await prefs.remove('active_plant_id');
+  }
+}
+
+Future<void> _loadSavedPlants() async {
+  final prefs = await SharedPreferences.getInstance();
+  final raw = prefs.getString('saved_plants');
+  final savedActiveId = prefs.getInt('active_plant_id');
+  if (raw == null) return;
+
+  final List decoded = jsonDecode(raw);
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+
+  setState(() {
+    _plants.clear();
+    for (final item in decoded) {
+      final start = DateTime.parse(item['tglMulai']);
+      final startDay = DateTime(start.year, start.month, start.day);
+      final hariKe = (today.difference(startDay).inDays + 1).clamp(1, 999);
+      _plants.add(PlantProfile(
+        id: item['id'],
+        name: item['name'],
+        suhuMin: (item['suhuMin'] as num).toDouble(),
+        suhuMax: (item['suhuMax'] as num).toDouble(),
+        durasiSiram: item['durasiSiram'],
+        autoAktif: item['autoAktif'],
+        jamSiram: List<String>.from(item['jamSiram']),
+        masaGelap: item['masaGelap'],
+        masaTerang: item['masaTerang'],
+        tglMulai: start,
+        hariKe: hariKe,
+        faseAwal: item['faseAwal'],
+        jamMulai: item['jamMulai'],
+        jamSelesai: item['jamSelesai'],
+        jamMulaiH1: item['jamMulaiH1'],
+        jumlahLampu: item['jumlahLampu'],
+      ));
+    }
+    if (savedActiveId != null) _activePlantId = savedActiveId;
+  });
+} 
 
   // MQTT State
   MqttConnectionStatus _mqttStatus = MqttConnectionStatus.disconnected;
@@ -110,11 +181,13 @@ class _MainShellScreenState extends State<MainShellScreen> {
     return null;
   }
 
-  @override
-  void initState() {
-    super.initState();
-    _initMqtt();
-  }
+ @override
+void initState() {
+  super.initState();
+  _initMqtt();
+  _loadSavedPlants();
+  NotificationService.instance.init();
+}
 
   void _initMqtt() {
     final mqtt = MqttService.instance;
@@ -139,24 +212,86 @@ class _MainShellScreenState extends State<MainShellScreen> {
     });
 
     _telemetrySub = mqtt.telemetryStream.listen((telemetry) {
-      if (!mounted) return;
-      setState(() {
-        if (telemetry.temperature != null) _suhu = telemetry.temperature!;
-        if (telemetry.humidity != null) _lembabUdara = telemetry.humidity!;
-        if (telemetry.soilMoisture != null) _lembabTanah = telemetry.soilMoisture!;
-        if (telemetry.lux != null) _lux = telemetry.lux!;
-        if (telemetry.fanRelay != null) _kipasOn = telemetry.fanRelay!;
-        if (telemetry.sprayerRelay != null) _sprayerOn = telemetry.sprayerRelay!;
-        if (telemetry.lamp1Relay != null) _lamp1On = telemetry.lamp1Relay!;
-        if (telemetry.lamp2Relay != null) _lamp2On = telemetry.lamp2Relay!;
-        if (telemetry.mode != null) {
-          _mode = telemetry.mode!.toLowerCase() == 'auto'
-              ? ControlMode.auto
-              : ControlMode.manual;
-        }
-        _lastUpdateTs = formatNowHms();
-      });
-    });
+  if (!mounted) return;
+
+  final prevKipas = _kipasOn;
+  final prevSprayer = _sprayerOn;
+  final prevLamp1 = _lamp1On;
+  final prevLamp2 = _lamp2On;
+
+  setState(() {
+    if (telemetry.temperature != null) _suhu = telemetry.temperature!;
+    if (telemetry.humidity != null) _lembabUdara = telemetry.humidity!;
+    if (telemetry.soilMoisture != null) _lembabTanah = telemetry.soilMoisture!;
+    if (telemetry.lux != null) _lux = telemetry.lux!;
+    if (telemetry.fanRelay != null) _kipasOn = telemetry.fanRelay!;
+    if (telemetry.sprayerRelay != null) _sprayerOn = telemetry.sprayerRelay!;
+    if (telemetry.lamp1Relay != null) _lamp1On = telemetry.lamp1Relay!;
+    if (telemetry.lamp2Relay != null) _lamp2On = telemetry.lamp2Relay!;
+    if (telemetry.mode != null) {
+      _mode = telemetry.mode!.toLowerCase() == 'auto'
+          ? ControlMode.auto
+          : ControlMode.manual;
+    }
+    // ... (biarkan kode sinkronisasi tanaman Anda di sini) ...
+    _lastUpdateTs = formatNowHms();
+  });
+
+  // Kirim notifikasi hanya jika bukan data pertama dan status berubah
+  if (_hasInitialTelemetry) {
+    final isAuto = _mode == ControlMode.auto;
+    final prefix = isAuto ? 'Otomatis' : 'Manual';
+
+    if (telemetry.fanRelay != null && telemetry.fanRelay != prevKipas) {
+      final on = telemetry.fanRelay!;
+      NotificationService.instance.show(
+        id: 1,
+        title: isAuto
+            ? 'Fuzzy Logic: Kipas ${on ? "Menyala" : "Mati"}'
+            : 'Manual: Kipas ${on ? "Menyala" : "Mati"}',
+        body: on
+            ? 'Kipas aktif mendinginkan inkubator. Suhu: ${_suhu.toStringAsFixed(1)}°C.'
+            : 'Kipas dimatikan. Suhu saat ini: ${_suhu.toStringAsFixed(1)}°C.',
+      );
+    }
+
+    if (telemetry.sprayerRelay != null &&
+        telemetry.sprayerRelay != prevSprayer) {
+      final on = telemetry.sprayerRelay!;
+      NotificationService.instance.show(
+        id: 2,
+        title: '$prefix: Sprayer ${on ? "Menyala" : "Mati"}',
+        body: on
+            ? 'Penyiraman sedang berlangsung. Kelembaban tanah: ${_lembabTanah.toInt()}%.'
+            : 'Penyiraman selesai dan sprayer dimatikan.',
+      );
+    }
+
+    if (telemetry.lamp1Relay != null && telemetry.lamp1Relay != prevLamp1) {
+      final on = telemetry.lamp1Relay!;
+      NotificationService.instance.show(
+        id: 3,
+        title: '$prefix: Lampu 1 ${on ? "Menyala" : "Mati"}',
+        body: on
+            ? 'Lampu utama grow light dinyalakan.'
+            : 'Lampu utama grow light dimatikan.',
+      );
+    }
+
+    if (telemetry.lamp2Relay != null && telemetry.lamp2Relay != prevLamp2) {
+      final on = telemetry.lamp2Relay!;
+      NotificationService.instance.show(
+        id: 4,
+        title: '$prefix: Lampu 2 ${on ? "Menyala" : "Mati"}',
+        body: on
+            ? 'Lampu booster (Lampu 2) dinyalakan.'
+            : 'Lampu booster (Lampu 2) dimatikan.',
+      );
+    }
+  }
+
+  _hasInitialTelemetry = true;
+});
 
     mqtt.connect();
   }

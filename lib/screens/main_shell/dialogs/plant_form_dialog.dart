@@ -114,27 +114,33 @@ class _PlantFormDialogState extends State<PlantFormDialog> {
   }
 
   void _submit() {
-    if (!_formKey.currentState!.validate()) return;
-    final profile = PlantProfile(
-      id: widget.existing?.id ?? DateTime.now().millisecondsSinceEpoch,
-      name: _namaCtrl.text.trim(),
-      suhuMin: double.tryParse(_suhuMinCtrl.text) ?? 20,
-      suhuMax: double.tryParse(_suhuMaxCtrl.text) ?? 30,
-      durasiSiram: int.tryParse(_durasiCtrl.text) ?? 10,
-      autoAktif: _autoAktif,
-      jamSiram: _jamSiram,
-      masaGelap: _gelapVal,
-      masaTerang: max(1, _terangVal),
-      tglMulai: _tglMulai,
-      hariKe: widget.existing?.hariKe ?? 1,
-      faseAwal: _faseAwal,
-      jamMulai: _jamMulai,
-      jamSelesai: _jamSelesai,
-      jamMulaiH1: _jamMulaiH1,
-      jumlahLampu: _jumlahLampu,
-    );
-    Navigator.of(context).pop(profile);
-  }
+  if (!_formKey.currentState!.validate()) return;
+
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final start = DateTime(_tglMulai.year, _tglMulai.month, _tglMulai.day);
+  final calculatedHariKe = max(1, today.difference(start).inDays + 1);
+
+  final profile = PlantProfile(
+    id: widget.existing?.id ?? DateTime.now().millisecondsSinceEpoch,
+    name: _namaCtrl.text.trim(),
+    suhuMin: double.tryParse(_suhuMinCtrl.text) ?? 20,
+    suhuMax: double.tryParse(_suhuMaxCtrl.text) ?? 30,
+    durasiSiram: int.tryParse(_durasiCtrl.text) ?? 10,
+    autoAktif: _autoAktif,
+    jamSiram: _jamSiram,
+    masaGelap: _gelapVal,
+    masaTerang: max(1, _terangVal),
+    tglMulai: _tglMulai,
+    hariKe: calculatedHariKe,
+    faseAwal: _faseAwal,
+    jamMulai: _jamMulai,
+    jamSelesai: _jamSelesai,
+    jamMulaiH1: _jamMulaiH1,
+    jumlahLampu: _jumlahLampu,
+  );
+  Navigator.of(context).pop(profile);
+}
 
   @override
   Widget build(BuildContext context) {
