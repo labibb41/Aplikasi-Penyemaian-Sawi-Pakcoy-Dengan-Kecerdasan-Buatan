@@ -1,4 +1,5 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/constants/app_colors.dart';
 import '../main_shell/main_shell_screen.dart';
@@ -16,6 +17,22 @@ class _LoginScreenState extends State<LoginScreen> {
   final _passCtrl = TextEditingController(text: 'semaiku2026');
   bool _obscurePassword = true;
   bool _rememberMe = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedEmail();
+  }
+
+  Future<void> _loadSavedEmail() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedEmail = prefs.getString('saved_email');
+    if (savedEmail != null && savedEmail.isNotEmpty) {
+      if (mounted) {
+        setState(() => _emailCtrl.text = savedEmail);
+      }
+    }
+  }
 
   @override
   void dispose() {
@@ -60,6 +77,15 @@ class _LoginScreenState extends State<LoginScreen> {
     );
 
     await Future.delayed(const Duration(milliseconds: 1100));
+    final prefs = await SharedPreferences.getInstance();
+    if (_rememberMe) {
+      await prefs.setBool('is_logged_in', true);
+      await prefs.setString('saved_email', _emailCtrl.text.trim());
+    } else {
+      await prefs.setBool('is_logged_in', false);
+      await prefs.remove('saved_email');
+    }
+
     if (!mounted) return;
     Navigator.of(context).pop(); // Close loading dialog
     Navigator.of(context).pushReplacement(

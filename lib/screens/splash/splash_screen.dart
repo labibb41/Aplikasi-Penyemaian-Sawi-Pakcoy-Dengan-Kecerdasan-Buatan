@@ -1,9 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/constants/app_colors.dart';
 import '../auth/login_screen.dart';
+import '../main_shell/main_shell_screen.dart';
 import 'widgets/splash_background_painter.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -26,7 +28,7 @@ class _SplashScreenState extends State<SplashScreen>
       duration: const Duration(milliseconds: 2100),
     )..forward();
 
-    _navTimer = Timer(const Duration(milliseconds: 2400), _goToLogin);
+    _navTimer = Timer(const Duration(milliseconds: 2400), _checkAuthAndNavigate);
   }
 
   @override
@@ -36,12 +38,20 @@ class _SplashScreenState extends State<SplashScreen>
     super.dispose();
   }
 
-  void _goToLogin() {
+  Future<void> _checkAuthAndNavigate() async {
     if (!mounted) return;
     _navTimer?.cancel();
+
+    final prefs = await SharedPreferences.getInstance();
+    final isLoggedIn = prefs.getBool('is_logged_in') ?? false;
+
+    if (!mounted) return;
+    final targetScreen =
+        isLoggedIn ? const MainShellScreen() : const LoginScreen();
+
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
-        pageBuilder: (_, _, _) => const LoginScreen(),
+        pageBuilder: (_, _, _) => targetScreen,
         transitionsBuilder: (_, anim, _, child) =>
             FadeTransition(opacity: anim, child: child),
         transitionDuration: const Duration(milliseconds: 300),

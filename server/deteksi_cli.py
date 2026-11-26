@@ -83,10 +83,14 @@ print("   ✅ YOLO berhasil dimuat! Kelas YOLO:", yolo_model.names, flush=True)
 print("\n⏳ [2/2] Loading Model Klasifikasi MobileNetV2...", flush=True)
 from tensorflow.keras.models import load_model
 
+class CustomDense(tf.keras.layers.Dense):
+    def __init__(self, *args, quantization_config=None, **kwargs):
+        super().__init__(*args, **kwargs)
+
 mobilenet_models = {}
 for name, path in MOBILENET_MODELS.items():
     if os.path.exists(path):
-        mobilenet_models[name] = load_model(path, compile=False)
+        mobilenet_models[name] = load_model(path, custom_objects={'Dense': CustomDense}, compile=False)
         print(f"   ✅ Model {name:<18} loaded ({os.path.basename(path)})", flush=True)
     else:
         print(f"   ⚠️  Model {name:<18} NOT FOUND: {path}", flush=True)

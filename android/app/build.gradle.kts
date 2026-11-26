@@ -8,7 +8,7 @@ android {
     
     namespace = "com.example.semaiku"
     compileSdk = 37
-    ndkVersion = flutter.ndkVersion
+    // ndkVersion = flutter.ndkVersion
 
     compileOptions {
         isCoreLibraryDesugaringEnabled = true

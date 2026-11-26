@@ -65,11 +65,15 @@ print("⏳ Loading YOLO model...")
 yolo_model = YOLO(YOLO_WEIGHTS)
 print("✅ YOLO model loaded!")
 
+class CustomDense(tf.keras.layers.Dense):
+    def __init__(self, *args, quantization_config=None, **kwargs):
+        super().__init__(*args, **kwargs)
+
 print("⏳ Loading MobileNetV2 models...")
 mobilenet_models = {}
 for name, path in MOBILENET_MODELS.items():
     if os.path.exists(path):
-        mobilenet_models[name] = load_model(path, compile=False)
+        mobilenet_models[name] = load_model(path, custom_objects={'Dense': CustomDense}, compile=False)
         print(f"  ✅ {name} loaded")
     else:
         print(f"  ⚠️  {name} NOT FOUND: {path}")

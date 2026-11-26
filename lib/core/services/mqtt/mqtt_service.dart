@@ -224,8 +224,6 @@ class MqttService {
       topicTelemetry,
       topicStatus,
       topicAlert,
-      'buncop/+/inkubator_1/telemetry',
-      'buncop/+/inkubator_1/status',
     ];
 
     for (final t in topics) {

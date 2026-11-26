@@ -237,60 +237,61 @@ void initState() {
     _lastUpdateTs = formatNowHms();
   });
 
-  // Kirim notifikasi hanya jika bukan data pertama dan status berubah
-  if (_hasInitialTelemetry) {
-    final isAuto = _mode == ControlMode.auto;
-    final prefix = isAuto ? 'Otomatis' : 'Manual';
+      // Kirim notifikasi hanya jika bukan data pertama dan status berubah
+      if (_hasInitialTelemetry) {
+        final isAuto = _mode == ControlMode.auto;
+        final prefix = isAuto ? 'Otomatis' : 'Manual';
+        final nowStr = _lastUpdateTs;
 
-    if (telemetry.fanRelay != null && telemetry.fanRelay != prevKipas) {
-      final on = telemetry.fanRelay!;
-      NotificationService.instance.show(
-        id: 1,
-        title: isAuto
-            ? 'Fuzzy Logic: Kipas ${on ? "Menyala" : "Mati"}'
-            : 'Manual: Kipas ${on ? "Menyala" : "Mati"}',
-        body: on
-            ? 'Kipas aktif mendinginkan inkubator. Suhu: ${_suhu.toStringAsFixed(1)}°C.'
-            : 'Kipas dimatikan. Suhu saat ini: ${_suhu.toStringAsFixed(1)}°C.',
-      );
-    }
+        if (telemetry.fanRelay != null && telemetry.fanRelay != prevKipas) {
+          final on = telemetry.fanRelay!;
+          NotificationService.instance.show(
+            id: 1,
+            title: isAuto
+                ? 'Fuzzy Logic: Kipas ${on ? "Menyala" : "Mati"}'
+                : 'Manual: Kipas ${on ? "Menyala" : "Mati"}',
+            body: on
+                ? '[$nowStr] Kipas aktif mendinginkan inkubator. Suhu: ${_suhu.toStringAsFixed(1)}°C.'
+                : '[$nowStr] Kipas dimatikan. Suhu saat ini: ${_suhu.toStringAsFixed(1)}°C.',
+          );
+        }
 
-    if (telemetry.sprayerRelay != null &&
-        telemetry.sprayerRelay != prevSprayer) {
-      final on = telemetry.sprayerRelay!;
-      NotificationService.instance.show(
-        id: 2,
-        title: '$prefix: Sprayer ${on ? "Menyala" : "Mati"}',
-        body: on
-            ? 'Penyiraman sedang berlangsung. Kelembaban tanah: ${_lembabTanah.toInt()}%.'
-            : 'Penyiraman selesai dan sprayer dimatikan.',
-      );
-    }
+        if (telemetry.sprayerRelay != null &&
+            telemetry.sprayerRelay != prevSprayer) {
+          final on = telemetry.sprayerRelay!;
+          NotificationService.instance.show(
+            id: 2,
+            title: '$prefix: Sprayer ${on ? "Menyala" : "Mati"}',
+            body: on
+                ? '[$nowStr] Penyiraman sedang berlangsung. Kelembaban tanah: ${_lembabTanah.toInt()}%. ($nowStr)'
+                : '[$nowStr] Penyiraman selesai dan sprayer dimatikan.',
+          );
+        }
 
-    if (telemetry.lamp1Relay != null && telemetry.lamp1Relay != prevLamp1) {
-      final on = telemetry.lamp1Relay!;
-      NotificationService.instance.show(
-        id: 3,
-        title: '$prefix: Lampu 1 ${on ? "Menyala" : "Mati"}',
-        body: on
-            ? 'Lampu utama grow light dinyalakan.'
-            : 'Lampu utama grow light dimatikan.',
-      );
-    }
+        if (telemetry.lamp1Relay != null && telemetry.lamp1Relay != prevLamp1) {
+          final on = telemetry.lamp1Relay!;
+          NotificationService.instance.show(
+            id: 3,
+            title: '$prefix: Lampu 1 ${on ? "Menyala" : "Mati"}',
+            body: on
+                ? '[$nowStr] Lampu utama grow light dinyalakan.'
+                : '[$nowStr] Lampu utama grow light dimatikan.',
+          );
+        }
 
-    if (telemetry.lamp2Relay != null && telemetry.lamp2Relay != prevLamp2) {
-      final on = telemetry.lamp2Relay!;
-      NotificationService.instance.show(
-        id: 4,
-        title: '$prefix: Lampu 2 ${on ? "Menyala" : "Mati"}',
-        body: on
-            ? 'Lampu booster (Lampu 2) dinyalakan.'
-            : 'Lampu booster (Lampu 2) dimatikan.',
-      );
-    }
-  }
-
-  _hasInitialTelemetry = true;
+        if (telemetry.lamp2Relay != null && telemetry.lamp2Relay != prevLamp2) {
+          final on = telemetry.lamp2Relay!;
+          NotificationService.instance.show(
+            id: 4,
+            title: '$prefix: Lampu 2 ${on ? "Menyala" : "Mati"}',
+            body: on
+                ? '[$nowStr] Lampu booster (Lampu 2) dinyalakan.'
+                : '[$nowStr] Lampu booster (Lampu 2) dimatikan.',
+          );
+        }
+      } else {
+        _hasInitialTelemetry = true;
+      }
 });
 
     mqtt.connect();
@@ -398,11 +399,14 @@ void initState() {
             ),
           ),
           FilledButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.of(ctx).pop();
               if (isExitApp) {
                 SystemNavigator.pop();
               } else {
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setBool('is_logged_in', false);
+                if (!mounted) return;
                 Navigator.of(context).pushReplacement(
                   MaterialPageRoute(builder: (_) => const LoginScreen()),
                 );

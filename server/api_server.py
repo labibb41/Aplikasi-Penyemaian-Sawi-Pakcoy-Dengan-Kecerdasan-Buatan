@@ -74,8 +74,12 @@ if os.path.exists(YOLO_SAMPING_WEIGHTS):
 else:
     print(f"⚠️ Model Samping tidak ditemukan di: {YOLO_SAMPING_WEIGHTS}")
 
+class CustomDense(tf.keras.layers.Dense):
+    def __init__(self, *args, quantization_config=None, **kwargs):
+        super().__init__(*args, **kwargs)
+
 print(f"⏳ Memuat MobileNetV2: {os.path.basename(MOB_WEIGHTS)}...")
-mob_model = tf.keras.models.load_model(MOB_WEIGHTS)
+mob_model = tf.keras.models.load_model(MOB_WEIGHTS, custom_objects={'Dense': CustomDense}, compile=False)
 print("✅ MobileNetV2 Model Loaded!")
 
 # Konfigurasi

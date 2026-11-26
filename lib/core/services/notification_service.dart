@@ -31,20 +31,22 @@ class NotificationService {
   }) async {
     if (kIsWeb || !_initialized) return;
 
-    const androidDetails = AndroidNotificationDetails(
+    final androidDetails = AndroidNotificationDetails(
       'semaiku_actuator_channel',
       'Status Aktuator & Fuzzy',
       channelDescription: 'Notifikasi perubahan kipas, sprayer, dan lampu',
       importance: Importance.high,
       priority: Priority.high,
+      showWhen: true,
+      when: DateTime.now().millisecondsSinceEpoch,
     );
 
-    const details = NotificationDetails(android: androidDetails);
+    final details = NotificationDetails(android: androidDetails);
     await _plugin.show(
-  id: id,
-  title: title,
-  body: body,
-  notificationDetails: details,
-);
+      id: id,
+      title: title,
+      body: body,
+      notificationDetails: details,
+    );
   }
 }
