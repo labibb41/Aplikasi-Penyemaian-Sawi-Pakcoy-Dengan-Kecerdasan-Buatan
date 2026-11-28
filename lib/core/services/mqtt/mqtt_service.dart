@@ -139,6 +139,9 @@ class MqttService {
   final _serverUrlController = StreamController<String>.broadcast();
   Stream<String> get serverUrlStream => _serverUrlController.stream;
 
+  String? _latestServerUrl;
+  String? get latestServerUrl => _latestServerUrl;
+
   bool _isConnecting = false;
 
   void _setStatus(MqttConnectionStatus status) {
@@ -253,6 +256,7 @@ class MqttService {
         final url = payloadString.trim();
         if (url.startsWith('http://') || url.startsWith('https://')) {
           debugPrint('[MQTT] URL server AI diterima: $url');
+          _latestServerUrl = url;
           _serverUrlController.add(url);
         }
         continue;

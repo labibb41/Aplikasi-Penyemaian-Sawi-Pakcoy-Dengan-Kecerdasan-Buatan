@@ -53,10 +53,24 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
   @override
   void initState() {
     super.initState();
-    _loadSavedServerUrl();
+    _initServerConnection();
+  }
+
+  Future<void> _initServerConnection() async {
+    await _loadSavedServerUrl();
     _listenMqttServerUrl();
-    // Otomatis cari server begitu menu dibuka!
-    _autoDiscoverServer();
+    // Jika MQTT sudah menerima URL sebelum tab ini dibuka, pakai langsung
+    final mqttUrl = MqttService.instance.latestServerUrl;
+    if (mqttUrl != null && mqttUrl.isNotEmpty) {
+      final normalized = normalizeServerUrl(mqttUrl);
+      if (mounted) {
+        setState(() => _serverBaseUrl = normalized);
+      }
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('semaiku_server_url', normalized);
+    }
+    // Otomatis cari/cek server begitu menu dibuka!
+    await _autoDiscoverServer();
   }
 
   @override
@@ -177,9 +191,22 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
   Future<bool> _pingServer(String urlOrIp) async {
     try {
       final baseUrl = normalizeServerUrl(urlOrIp);
+      // Cloudflare Tunnel memerlukan header User-Agent yang valid (non-empty)
+      // agar tidak mendapatkan "challenge" response (403/503).
       final res = await http
-          .get(Uri.parse('$baseUrl/api/health'))
-          .timeout(const Duration(milliseconds: 2500));
+          .get(
+            Uri.parse('$baseUrl/api/health'),
+            headers: {
+              'User-Agent': 'SemaiKuApp/1.0',
+              'Accept': 'application/json',
+            },
+          )
+          .timeout(
+            // Cloudflare Tunnel cold-start bisa 5–8 detik, beri toleransi lebih
+            baseUrl.startsWith('https://')
+                ? const Duration(seconds: 10)
+                : const Duration(milliseconds: 2500),
+          );
       return res.statusCode == 200;
     } catch (_) {
       return false;
@@ -497,6 +524,9 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
     try {
       final uri = Uri.parse('$_serverBaseUrl/api/predict/top');
       final request = http.MultipartRequest('POST', uri);
+      // Header wajib untuk Cloudflare Tunnel (mencegah challenge response)
+      request.headers['User-Agent'] = 'SemaiKuApp/1.0';
+      request.headers['Accept'] = 'application/json';
 
       final bytes = await _topImage!.readAsBytes();
       request.files.add(
@@ -589,6 +619,8 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
     try {
       final uri = Uri.parse('$_serverBaseUrl/api/predict/side');
       final request = http.MultipartRequest('POST', uri);
+      request.headers['User-Agent'] = 'SemaiKuApp/1.0';
+      request.headers['Accept'] = 'application/json';
 
       final bytes = await _sideImage!.readAsBytes();
       request.files.add(
