@@ -11,6 +11,7 @@ import threading
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 import tensorflow as tf
 from ultralytics import YOLO
 
@@ -264,6 +265,234 @@ def health_check():
         "supports": ["top_view", "side_view"]
     }
 
+def _decode_and_resize(contents: bytes, max_dim: int = 1280) -> np.ndarray:
+    """Decode bytes gambar dan perkecil jika resolusi terlalu besar agar inferensi cepat & ringan."""
+    nparr = np.frombuffer(contents, np.uint8)
+    img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img_bgr is None:
+        raise HTTPException(status_code=400, detail="Format gambar tidak valid")
+    h, w = img_bgr.shape[:2]
+    longest = max(h, w)
+    if longest > max_dim:
+        scale = max_dim / float(longest)
+        img_bgr = cv2.resize(img_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    return img_bgr
+
+
+def _run_top_inference(contents: bytes) -> dict:
+    img_bgr = _decode_and_resize(contents)
+    h, w = img_bgr.shape[:2]
+
+    # ── 1. INFERENSI YOLO ──
+    yolo_results = yolo_model(img_bgr, conf=0.15, iou=0.45, verbose=False)[0]
+    boxes = yolo_results.boxes
+
+    detections = []
+    if boxes is not None and len(boxes) > 0:
+        for box in boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            yconf = float(box.conf[0])
+            ycls = int(box.cls[0]) if box.cls is not None else 0
+            detections.append((x1, y1, x2, y2, yconf, ycls))
+
+    bibit_dets = [d for d in detections if d[5] == 0]
+    kotak_dets = [d for d in detections if d[5] == 1]
+
+    # Jika ada deteksi tapi tidak ada label 0 terpisah
+    if detections and not bibit_dets:
+        bibit_dets = detections
+
+    # Saring box bibit kanopi daun (hilangkan duplikasi tumpang tindih)
+    if bibit_dets:
+        bibit_dets = select_best_leaf_boxes(img_bgr, bibit_dets)
+
+    # ── 2. ANALISIS KOTAK TRAY & BIJI TERDETEKSI ──
+    vis_bgr = img_bgr.copy()
+    COLOR_KOTAK_ISI   = (255, 180, 0)    # Cyan / Biru Muda untuk slot terisi (sesuai referensi)
+    COLOR_KOTAK_EMPTY = (120, 120, 120)  # Abu-abu untuk slot kosong
+    COLOR_EMPTY_TXT   = (180, 180, 180)  # Abu-abu terang untuk teks EMPTY
+
+    is_tray = len(kotak_dets) >= 2
+    valid_bibit = []
+    is_fallback_closeup = False
+
+    if is_tray:
+        # Urutkan slot kisi tray dari atas ke bawah, kiri ke kanan
+        kotak_dets = sorted(kotak_dets, key=lambda b: (b[1] // 40, b[0]))
+        tray_slots = []
+        used_bibit = set()
+
+        for s_idx, k_box in enumerate(kotak_dets):
+            kx1, ky1, kx2, ky2 = k_box[:4]
+            found_bibit = None
+
+            for b_idx, b_box in enumerate(bibit_dets):
+                if b_idx in used_bibit:
+                    continue
+                bx1, by1, bx2, by2 = b_box[:4]
+                bcx, bcy = (bx1 + bx2) / 2, (by1 + by2) / 2
+
+                if kx1 <= bcx <= kx2 and ky1 <= bcy <= ky2:
+                    found_bibit = b_box
+                    used_bibit.add(b_idx)
+                    break
+
+            slot_info = {
+                "slot_idx": s_idx + 1,
+                "kotak_box": (kx1, ky1, kx2, ky2),
+                "has_bibit": found_bibit is not None,
+                "bibit_box": found_bibit
+            }
+            tray_slots.append(slot_info)
+
+            if found_bibit is not None:
+                valid_bibit.append(found_bibit)
+                # Gambar kotak kisi tray terisi (Cyan)
+                cv2.rectangle(vis_bgr, (kx1, ky1), (kx2, ky2), COLOR_KOTAK_ISI, 1)
+                cv2.putText(vis_bgr, f"#{s_idx + 1}", (kx1 + 2, ky1 + 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.28, COLOR_KOTAK_ISI, 1, cv2.LINE_AA)
+            else:
+                # Gambar kotak kisi tray kosong (Abu-abu + Label EMPTY)
+                cv2.rectangle(vis_bgr, (kx1, ky1), (kx2, ky2), COLOR_KOTAK_EMPTY, 1)
+                cv2.putText(vis_bgr, f"#{s_idx + 1}", (kx1 + 2, ky1 + 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.28, COLOR_KOTAK_EMPTY, 1, cv2.LINE_AA)
+                cx, cy = (kx1 + kx2) // 2, (ky1 + ky2) // 2
+                cv2.putText(vis_bgr, "EMPTY", (cx - 16, cy + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.30, COLOR_EMPTY_TXT, 1, cv2.LINE_AA)
+
+        # Tambahkan juga bibit di luar slot kisi tray jika ada
+        for b_idx, b_box in enumerate(bibit_dets):
+            if b_idx not in used_bibit:
+                valid_bibit.append(b_box)
+
+        total_kotak = len(kotak_dets)
+        biji_terdeteksi = len(valid_bibit)
+        kotak_kosong = max(0, total_kotak - len(used_bibit))
+        daya_kecambah = round((len(used_bibit) / total_kotak * 100), 1) if total_kotak > 0 else 100.0
+    else:
+        # Fallback fleksibel jika memotret 1 bibit dekat (close-up) atau tanpa kisi tray
+        if not bibit_dets:
+            is_fallback_closeup = True
+            margin_x = int(w * 0.08)
+            margin_y = int(h * 0.08)
+            bibit_dets = [(margin_x, margin_y, w - margin_x, h - margin_y, 0.95, 0)]
+
+        valid_bibit = bibit_dets
+        total_kotak = len(valid_bibit)
+        biji_terdeteksi = len(valid_bibit)
+        kotak_kosong = 0
+        daya_kecambah = 100.0
+
+    # ── 3. KLASIFIKASI DENGAN MOBILENETV2 (BATCH INFERENCE CEPAT) ──
+    results = []
+    counts = {"normal": 0, "etiolasi_ringan": 0, "etiolasi_berat": 0}
+
+    batch_inputs = []
+    crops_bgr = []
+    clean_valid_bibit = []
+
+    for b in valid_bibit:
+        x1, y1, x2, y2, yconf, _ = b
+        crop = img_bgr[y1:y2, x1:x2]
+        if crop.size == 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
+            continue
+        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        crop_pil = Image.fromarray(crop_rgb).resize(IMG_SIZE)
+        arr = np.array(crop_pil, dtype=np.float32) / 255.0
+        batch_inputs.append(arr)
+        clean_valid_bibit.append(b)
+        crops_bgr.append(crop)
+
+    if batch_inputs:
+        X_tensor = tf.convert_to_tensor(np.stack(batch_inputs, axis=0), dtype=tf.float32)
+        all_preds = mob_model(X_tensor, training=False).numpy()
+
+        for i, (b, crop, preds) in enumerate(zip(clean_valid_bibit, crops_bgr, all_preds), 1):
+            x1, y1, x2, y2, yconf, _ = b
+            p_berat, p_ringan, p_normal = float(preds[0]), float(preds[1]), float(preds[2])
+
+            # Cari kotak slot tray tempat bibit ini berada (jika ada)
+            matched_kotak = None
+            for k_box in kotak_dets:
+                kx1, ky1, kx2, ky2 = k_box[:4]
+                bcx, bcy = (x1 + x2) / 2, (y1 + y2) / 2
+                if kx1 <= bcx <= kx2 and ky1 <= bcy <= ky2:
+                    matched_kotak = (kx1, ky1, kx2, ky2)
+                    break
+
+            label, conf = classify_crop_physiological(
+                crop, p_berat, p_ringan, p_normal,
+                bbox=(x1, y1, x2, y2), kotak_box=matched_kotak
+            )
+
+            counts[label] += 1
+            disp_label = CLASS_DISPLAY.get(label, label)
+            color_rgb = CLASS_COLORS_RGB.get(label, (46, 204, 113))
+            color_bgr = (color_rgb[2], color_rgb[1], color_rgb[0])
+
+            # Gambar bounding box bibit
+            cv2.rectangle(vis_bgr, (x1, y1), (x2, y2), color_bgr, 2)
+
+            # Badge teks label di atas kotak
+            txt = f"{disp_label} {conf:.0%}"
+            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            badge_top = max(0, y1 - th - 6)
+            cv2.rectangle(vis_bgr, (x1, badge_top), (x1 + tw + 6, y1), color_bgr, -1)
+            text_color = (0, 0, 0) if label == "etiolasi_ringan" else (255, 255, 255)
+            cv2.putText(vis_bgr, txt, (x1 + 3, y1 - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, text_color, 1, cv2.LINE_AA)
+
+            results.append({
+                "id": i,
+                "label": label,
+                "display_label": disp_label,
+                "confidence": round(conf, 4),
+                "bbox": [x1, y1, x2, y2]
+            })
+
+    total = len(results)
+    normal_cnt = counts["normal"]
+    ringan_cnt = counts["etiolasi_ringan"]
+    berat_cnt = counts["etiolasi_berat"]
+
+    pct_normal = round((normal_cnt / total * 100), 1) if total > 0 else 0.0
+
+    # Ringkasan status keseluruhan & Rekomendasi Pintar SemaiKu
+    if berat_cnt > 0:
+        status_overall = "Etiolasi Berat Terdeteksi"
+        rekomendasi = f"Ditemukan {berat_cnt} bibit kutilang (etiolasi berat) dari {biji_terdeteksi} bibit tumbuh. Segera aktifkan Booster Lampu (Lampu 2) dan dekatkan jarak pencahayaan ke bibit."
+    elif ringan_cnt > 0:
+        status_overall = "Etiolasi Ringan Terdeteksi"
+        rekomendasi = f"Ditemukan {ringan_cnt} bibit mulai kekurangan cahaya. Disarankan menambah durasi masa terang Grow Light sebanyak 1-2 jam."
+    else:
+        status_overall = "Kondisi Sangat Baik (Normal)"
+        rekomendasi = f"Semua {biji_terdeteksi} bibit tumbuh optimal dan sehat ({pct_normal}% normal). Pertahankan siklus terang/gelap serta suhu inkubator saat ini."
+
+    # Encode gambar hasil ke Base64 JPEG
+    _, enc_jpg = cv2.imencode(".jpg", vis_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    annotated_b64 = "data:image/jpeg;base64," + base64.b64encode(enc_jpg.tobytes()).decode("ascii")
+
+    return {
+        "success": True,
+        "framing_type": "Close-Up / Parsial" if is_fallback_closeup or (not is_tray and total <= 3) else "Multi-Bibit / Tray",
+        "total_kotak": total_kotak,
+        "biji_terdeteksi": biji_terdeteksi,
+        "kotak_kosong": kotak_kosong,
+        "daya_kecambah": daya_kecambah,
+        "total_tanaman": biji_terdeteksi,
+        "normal": normal_cnt,
+        "etiolasi_ringan": ringan_cnt,
+        "etiolasi_berat": berat_cnt,
+        "persentase_normal": pct_normal,
+        "status_keseluruhan": status_overall,
+        "rekomendasi": rekomendasi,
+        "annotated_image": annotated_b64,
+        "detail_tanaman": results
+    }
+
+
 @app.post("/api/predict/top")
 async def predict_top_view(file: UploadFile = File(...)):
     """
@@ -275,227 +504,223 @@ async def predict_top_view(file: UploadFile = File(...)):
     """
     try:
         contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        if img_bgr is None:
-            raise HTTPException(status_code=400, detail="Format gambar tidak valid")
-
-        h, w = img_bgr.shape[:2]
-
-        # ── 1. INFERENSI YOLO ──
-        yolo_results = yolo_model(img_bgr, conf=0.15, iou=0.45, verbose=False)[0]
-        boxes = yolo_results.boxes
-
-        detections = []
-        if boxes is not None and len(boxes) > 0:
-            for box in boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(w, x2), min(h, y2)
-                yconf = float(box.conf[0])
-                ycls = int(box.cls[0]) if box.cls is not None else 0
-                detections.append((x1, y1, x2, y2, yconf, ycls))
-
-        bibit_dets = [d for d in detections if d[5] == 0]
-        kotak_dets = [d for d in detections if d[5] == 1]
-
-        # Jika ada deteksi tapi tidak ada label 0 terpisah
-        if detections and not bibit_dets:
-            bibit_dets = detections
-
-        # Saring box bibit kanopi daun (hilangkan duplikasi tumpang tindih)
-        if bibit_dets:
-            bibit_dets = select_best_leaf_boxes(img_bgr, bibit_dets)
-
-        # ── 2. ANALISIS KOTAK TRAY & BIJI TERDETEKSI ──
-        vis_bgr = img_bgr.copy()
-        COLOR_KOTAK_ISI   = (255, 180, 0)    # Cyan / Biru Muda untuk slot terisi (sesuai referensi)
-        COLOR_KOTAK_EMPTY = (120, 120, 120)  # Abu-abu untuk slot kosong
-        COLOR_EMPTY_TXT   = (180, 180, 180)  # Abu-abu terang untuk teks EMPTY
-
-        is_tray = len(kotak_dets) >= 2
-        valid_bibit = []
-        is_fallback_closeup = False
-
-        if is_tray:
-            # Urutkan slot kisi tray dari atas ke bawah, kiri ke kanan
-            kotak_dets = sorted(kotak_dets, key=lambda b: (b[1] // 40, b[0]))
-            tray_slots = []
-            used_bibit = set()
-
-            for s_idx, k_box in enumerate(kotak_dets):
-                kx1, ky1, kx2, ky2 = k_box[:4]
-                found_bibit = None
-
-                for b_idx, b_box in enumerate(bibit_dets):
-                    if b_idx in used_bibit:
-                        continue
-                    bx1, by1, bx2, by2 = b_box[:4]
-                    bcx, bcy = (bx1 + bx2) / 2, (by1 + by2) / 2
-
-                    if kx1 <= bcx <= kx2 and ky1 <= bcy <= ky2:
-                        found_bibit = b_box
-                        used_bibit.add(b_idx)
-                        break
-
-                slot_info = {
-                    "slot_idx": s_idx + 1,
-                    "kotak_box": (kx1, ky1, kx2, ky2),
-                    "has_bibit": found_bibit is not None,
-                    "bibit_box": found_bibit
-                }
-                tray_slots.append(slot_info)
-
-                if found_bibit is not None:
-                    valid_bibit.append(found_bibit)
-                    # Gambar kotak kisi tray terisi (Cyan)
-                    cv2.rectangle(vis_bgr, (kx1, ky1), (kx2, ky2), COLOR_KOTAK_ISI, 1)
-                    cv2.putText(vis_bgr, f"#{s_idx + 1}", (kx1 + 2, ky1 + 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.28, COLOR_KOTAK_ISI, 1, cv2.LINE_AA)
-                else:
-                    # Gambar kotak kisi tray kosong (Abu-abu + Label EMPTY)
-                    cv2.rectangle(vis_bgr, (kx1, ky1), (kx2, ky2), COLOR_KOTAK_EMPTY, 1)
-                    cv2.putText(vis_bgr, f"#{s_idx + 1}", (kx1 + 2, ky1 + 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.28, COLOR_KOTAK_EMPTY, 1, cv2.LINE_AA)
-                    cx, cy = (kx1 + kx2) // 2, (ky1 + ky2) // 2
-                    cv2.putText(vis_bgr, "EMPTY", (cx - 16, cy + 4),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.30, COLOR_EMPTY_TXT, 1, cv2.LINE_AA)
-
-            # Tambahkan juga bibit di luar slot kisi tray jika ada
-            for b_idx, b_box in enumerate(bibit_dets):
-                if b_idx not in used_bibit:
-                    valid_bibit.append(b_box)
-
-            total_kotak = len(kotak_dets)
-            biji_terdeteksi = len(valid_bibit)
-            kotak_kosong = max(0, total_kotak - len(used_bibit))
-            daya_kecambah = round((len(used_bibit) / total_kotak * 100), 1) if total_kotak > 0 else 100.0
-        else:
-            # Fallback fleksibel jika memotret 1 bibit dekat (close-up) atau tanpa kisi tray
-            if not bibit_dets:
-                is_fallback_closeup = True
-                margin_x = int(w * 0.08)
-                margin_y = int(h * 0.08)
-                bibit_dets = [(margin_x, margin_y, w - margin_x, h - margin_y, 0.95, 0)]
-
-            valid_bibit = bibit_dets
-            total_kotak = len(valid_bibit)
-            biji_terdeteksi = len(valid_bibit)
-            kotak_kosong = 0
-            daya_kecambah = 100.0
-
-        # ── 3. KLASIFIKASI DENGAN MOBILENETV2 (BATCH INFERENCE CEPAT) ──
-        results = []
-        counts = {"normal": 0, "etiolasi_ringan": 0, "etiolasi_berat": 0}
-
-        batch_inputs = []
-        crops_bgr = []
-        clean_valid_bibit = []
-
-        for b in valid_bibit:
-            x1, y1, x2, y2, yconf, _ = b
-            crop = img_bgr[y1:y2, x1:x2]
-            if crop.size == 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
-                continue
-            crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            crop_pil = Image.fromarray(crop_rgb).resize(IMG_SIZE)
-            arr = np.array(crop_pil, dtype=np.float32) / 255.0
-            batch_inputs.append(arr)
-            clean_valid_bibit.append(b)
-            crops_bgr.append(crop)
-
-        if batch_inputs:
-            X_tensor = tf.convert_to_tensor(np.stack(batch_inputs, axis=0), dtype=tf.float32)
-            all_preds = mob_model(X_tensor, training=False).numpy()
-
-            for i, (b, crop, preds) in enumerate(zip(clean_valid_bibit, crops_bgr, all_preds), 1):
-                x1, y1, x2, y2, yconf, _ = b
-                p_berat, p_ringan, p_normal = float(preds[0]), float(preds[1]), float(preds[2])
-
-                # Cari kotak slot tray tempat bibit ini berada (jika ada)
-                matched_kotak = None
-                for k_box in kotak_dets:
-                    kx1, ky1, kx2, ky2 = k_box[:4]
-                    bcx, bcy = (x1 + x2) / 2, (y1 + y2) / 2
-                    if kx1 <= bcx <= kx2 and ky1 <= bcy <= ky2:
-                        matched_kotak = (kx1, ky1, kx2, ky2)
-                        break
-
-                label, conf = classify_crop_physiological(
-                    crop, p_berat, p_ringan, p_normal,
-                    bbox=(x1, y1, x2, y2), kotak_box=matched_kotak
-                )
-
-                counts[label] += 1
-                disp_label = CLASS_DISPLAY.get(label, label)
-                color_rgb = CLASS_COLORS_RGB.get(label, (46, 204, 113))
-                color_bgr = (color_rgb[2], color_rgb[1], color_rgb[0])
-
-                # Gambar bounding box bibit
-                cv2.rectangle(vis_bgr, (x1, y1), (x2, y2), color_bgr, 2)
-
-                # Badge teks label di atas kotak
-                txt = f"{disp_label} {conf:.0%}"
-                (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-                badge_top = max(0, y1 - th - 6)
-                cv2.rectangle(vis_bgr, (x1, badge_top), (x1 + tw + 6, y1), color_bgr, -1)
-                text_color = (0, 0, 0) if label == "etiolasi_ringan" else (255, 255, 255)
-                cv2.putText(vis_bgr, txt, (x1 + 3, y1 - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, text_color, 1, cv2.LINE_AA)
-
-                results.append({
-                    "id": i,
-                    "label": label,
-                    "display_label": disp_label,
-                    "confidence": round(conf, 4),
-                    "bbox": [x1, y1, x2, y2]
-                })
-
-        total = len(results)
-        normal_cnt = counts["normal"]
-        ringan_cnt = counts["etiolasi_ringan"]
-        berat_cnt = counts["etiolasi_berat"]
-
-        pct_normal = round((normal_cnt / total * 100), 1) if total > 0 else 0.0
-
-        # Ringkasan status keseluruhan & Rekomendasi Pintar SemaiKu
-        if berat_cnt > 0:
-            status_overall = "Etiolasi Berat Terdeteksi"
-            rekomendasi = f"Ditemukan {berat_cnt} bibit kutilang (etiolasi berat) dari {biji_terdeteksi} bibit tumbuh. Segera aktifkan Booster Lampu (Lampu 2) dan dekatkan jarak pencahayaan ke bibit."
-        elif ringan_cnt > 0:
-            status_overall = "Etiolasi Ringan Terdeteksi"
-            rekomendasi = f"Ditemukan {ringan_cnt} bibit mulai kekurangan cahaya. Disarankan menambah durasi masa terang Grow Light sebanyak 1-2 jam."
-        else:
-            status_overall = "Kondisi Sangat Baik (Normal)"
-            rekomendasi = f"Semua {biji_terdeteksi} bibit tumbuh optimal dan sehat ({pct_normal}% normal). Pertahankan siklus terang/gelap serta suhu inkubator saat ini."
-
-        # Encode gambar hasil ke Base64 JPEG
-        _, enc_jpg = cv2.imencode(".jpg", vis_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        annotated_b64 = "data:image/jpeg;base64," + base64.b64encode(enc_jpg.tobytes()).decode("ascii")
-
-        return {
-            "success": True,
-            "framing_type": "Close-Up / Parsial" if is_fallback_closeup or (not is_tray and total <= 3) else "Multi-Bibit / Tray",
-            "total_kotak": total_kotak,
-            "biji_terdeteksi": biji_terdeteksi,
-            "kotak_kosong": kotak_kosong,
-            "daya_kecambah": daya_kecambah,
-            "total_tanaman": biji_terdeteksi,
-            "normal": normal_cnt,
-            "etiolasi_ringan": ringan_cnt,
-            "etiolasi_berat": berat_cnt,
-            "persentase_normal": pct_normal,
-            "status_keseluruhan": status_overall,
-            "rekomendasi": rekomendasi,
-            "annotated_image": annotated_b64,
-            "detail_tanaman": results
-        }
-
+        return await run_in_threadpool(_run_top_inference, contents)
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _run_side_inference(contents: bytes, tray_width_cm: float) -> dict:
+    img_bgr = _decode_and_resize(contents)
+    h_img, w_img = img_bgr.shape[:2]
+
+    # Inferensi YOLO Samping
+    results_yolo = yolo_samping_model(img_bgr, conf=0.25, imgsz=640, verbose=False)[0]
+    boxes = results_yolo.boxes
+    masks = results_yolo.masks
+
+    tanaman_list = []
+    tray_box = None
+
+    if boxes is not None and len(boxes) > 0:
+        for i, box in enumerate(boxes):
+            cls_id = int(box.cls[0])
+            cls_name = yolo_samping_model.names.get(cls_id, "")
+            conf = float(box.conf[0])
+            xyxy = box.xyxy[0].cpu().numpy()
+            mask_poly = masks.xy[i] if masks is not None else None
+
+            if "tray" in cls_name.lower():
+                tray_box = xyxy
+            elif "batang" in cls_name.lower():
+                tanaman_list.append({
+                    "box": xyxy,
+                    "conf": conf,
+                    "poly": mask_poly
+                })
+
+    if tray_box is not None:
+        tx1, ty1, tx2, ty2 = tray_box
+        tray_w_px = max(1.0, tx2 - tx1)
+        scale_cm_per_px = tray_width_cm / tray_w_px
+        baseline_y = ty1
+    else:
+        scale_cm_per_px = 0.05
+        baseline_y = max([t["box"][3] for t in tanaman_list]) if tanaman_list else h_img - 20
+
+    vis_bgr = img_bgr.copy()
+
+    # Garis acuan tray bawah (disembunyikan agar tampilan hasil analisa lebih bersih dan fokus pada tanaman)
+    # AI tetap menggunakan tray_box di latar belakang untuk kalibrasi tinggi cm yang akurat.
+    show_tray_line = False
+    if show_tray_line and tray_box is not None:
+        by = int(baseline_y)
+        x_start = int(tray_box[0])
+        x_end = int(tray_box[2])
+        # Garis horizontal batas tray (Merah)
+        cv2.line(vis_bgr, (x_start, by), (x_end, by), (0, 0, 255), 2, cv2.LINE_AA)
+        # Label teks di bawah garis agar tidak menabrak kotak tanaman
+        cv2.putText(vis_bgr, "--- BATAS TRAY (0 cm) ---", (x_start + 6, min(h_img - 6, by + 16)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 255), 1, cv2.LINE_AA)
+
+    tanaman_list = sorted(tanaman_list, key=lambda t: t["box"][0])
+    results_detail = []
+    counts = {"normal": 0, "etiolasi_ringan": 0, "etiolasi_berat": 0}
+    all_heights = []
+    placed_badges = []
+
+    for idx, t in enumerate(tanaman_list, 1):
+        x1, y1, x2, y2 = map(int, t["box"])
+        poly = t["poly"]
+
+        pucuk_y = int(np.min(poly[:, 1])) if poly is not None and len(poly) > 0 else y1
+        pangkal_y = int(baseline_y) if baseline_y > pucuk_y else y2
+
+        tinggi_px = max(1, pangkal_y - pucuk_y)
+        tinggi_cm = round(float(tinggi_px * scale_cm_per_px), 2)
+        all_heights.append(tinggi_cm)
+
+        # Analisis Warna Batang (40% bawah)
+        stem_y_start = int(pucuk_y + 0.60 * tinggi_px)
+        stem_y_end = min(h_img, pangkal_y)
+        stem_crop = img_bgr[stem_y_start:stem_y_end, max(0, x1):min(w_img, x2)]
+
+        is_pale = False
+        color_desc = "Hijau"
+        if stem_crop.size > 0:
+            hsv = cv2.cvtColor(stem_crop, cv2.COLOR_BGR2HSV)
+            pale_mask = cv2.inRange(hsv, (0, 0, 150), (180, 55, 255))
+            green_mask = cv2.inRange(hsv, (25, 40, 40), (85, 255, 255))
+            pale_ratio = float(np.mean(pale_mask > 0))
+            green_ratio = float(np.mean(green_mask > 0))
+
+            if pale_ratio >= 0.25 and green_ratio < 0.20:
+                is_pale = True
+                color_desc = f"Pucat ({pale_ratio:.0%})"
+            else:
+                color_desc = f"Hijau ({green_ratio:.0%})"
+
+        if tinggi_cm <= 10.0:
+            status = "Normal"
+            color_bgr = (0, 220, 0)
+            counts["normal"] += 1
+        elif is_pale:
+            status = "Etiolasi Berat"
+            color_bgr = (0, 0, 230)
+            counts["etiolasi_berat"] += 1
+        else:
+            status = "Etiolasi Ringan"
+            color_bgr = (0, 165, 255)
+            counts["etiolasi_ringan"] += 1
+
+        # Gambar Kotak Bounding Box
+        cv2.rectangle(vis_bgr, (x1, y1), (x2, y2), color_bgr, 2)
+
+        # Garis ukur tinggi
+        cx = int((x1 + x2) / 2)
+        cv2.line(vis_bgr, (cx, pangkal_y), (cx, pucuk_y), (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.circle(vis_bgr, (cx, pucuk_y), 3, (0, 255, 255), -1)
+
+        # Anti-collision Staggered Badge (Penyusunan label bertingkat agar tidak bertumpuk)
+        label_txt = f"{status} {tinggi_cm:.1f}cm"
+        font_scale = 0.42
+        font_thick = 1
+        (tw, th), _ = cv2.getTextSize(label_txt, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
+
+        badge_w = tw + 8
+        badge_h = th + 6
+        bx1 = max(4, min(w_img - badge_w - 4, cx - badge_w // 2))
+        bx2 = bx1 + badge_w
+
+        chosen_level = 0
+        best_by1 = max(4, y1 - badge_h - 4)
+        best_by2 = best_by1 + badge_h
+
+        for level in range(5):
+            cand_by2 = y1 - 4 - (level * (badge_h + 8))
+            cand_by1 = cand_by2 - badge_h
+            if cand_by1 < 4:
+                break
+
+            collision = False
+            for (ox1, oy1, ox2, oy2) in placed_badges:
+                if not (bx2 + 4 < ox1 or bx1 - 4 > ox2 or cand_by2 + 2 < oy1 or cand_by1 - 2 > oy2):
+                    collision = True
+                    break
+
+            if not collision:
+                chosen_level = level
+                best_by1 = cand_by1
+                best_by2 = cand_by2
+                break
+            else:
+                chosen_level = level
+                best_by1 = cand_by1
+                best_by2 = cand_by2
+
+        placed_badges.append((bx1, best_by1, bx2, best_by2))
+
+        # Jika berada di tingkat lebih tinggi (level > 0), gambar garis penunjuk (leader line)
+        if chosen_level > 0:
+            cv2.line(vis_bgr, (cx, best_by2), (cx, y1), color_bgr, 1, cv2.LINE_AA)
+            cv2.circle(vis_bgr, (cx, y1), 2, color_bgr, -1)
+
+        # Gambar solid badge label
+        cv2.rectangle(vis_bgr, (bx1, best_by1), (bx2, best_by2), color_bgr, -1)
+        text_color = (0, 0, 0) if status == "Etiolasi Ringan" else (255, 255, 255)
+        text_y = best_by1 + th + 3
+        cv2.putText(vis_bgr, label_txt, (bx1 + 4, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, font_thick, cv2.LINE_AA)
+
+        results_detail.append({
+            "id": idx,
+            "status": status,
+            "tinggi_cm": tinggi_cm,
+            "tinggi_px": tinggi_px,
+            "warna_batang": color_desc,
+            "bbox": [x1, y1, x2, y2]
+        })
+
+    total_tanaman = len(results_detail)
+    avg_height = round(float(np.mean(all_heights)), 1) if all_heights else 0.0
+    normal_cnt = counts["normal"]
+    ringan_cnt = counts["etiolasi_ringan"]
+    berat_cnt = counts["etiolasi_berat"]
+
+    pct_normal = round((normal_cnt / total_tanaman * 100), 1) if total_tanaman > 0 else 0.0
+    pct_etiolasi = round(100.0 - pct_normal, 1)
+
+    if berat_cnt > 0:
+        status_overall = "Etiolasi Berat Terdeteksi (Kutilang)"
+        rekomendasi = f"Ditemukan {berat_cnt} batang meninggi pucat (>10 cm). Batang rapuh, segera turunkan intensitas jarak lampu dan berikan sirkulasi udara."
+    elif ringan_cnt > 0:
+        status_overall = "Etiolasi Ringan Terdeteksi"
+        rekomendasi = f"Ditemukan {ringan_cnt} batang mulai meninggi (>10 cm) namun masih hijau. Tambahkan durasi penyinaran 1-2 jam."
+    else:
+        status_overall = "Batang Kokoh (Normal)"
+        rekomendasi = f"Semua {total_tanaman} batang tanaman tumbuh proporsional (<=10 cm, rata-rata {avg_height} cm). Kondisi pencahayaan saat ini sangat tepat."
+
+    _, enc_jpg = cv2.imencode(".jpg", vis_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    annotated_b64 = "data:image/jpeg;base64," + base64.b64encode(enc_jpg.tobytes()).decode("ascii")
+
+    return {
+        "success": True,
+        "total_tanaman": total_tanaman,
+        "biji_terdeteksi": total_tanaman,
+        "tinggi_rata_rata": avg_height,
+        "normal": normal_cnt,
+        "etiolasi_ringan": ringan_cnt,
+        "etiolasi_berat": berat_cnt,
+        "persentase_normal": pct_normal,
+        "persentase_etiolasi": pct_etiolasi,
+        "status_keseluruhan": status_overall,
+        "rekomendasi": rekomendasi,
+        "annotated_image": annotated_b64,
+        "detail_tanaman": results_detail
+    }
+
 
 @app.post("/api/predict/side")
 @app.post("/api/predict/samping")
@@ -511,218 +736,9 @@ async def predict_side_view(file: UploadFile = File(...), tray_width_cm: float =
 
     try:
         contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        if img_bgr is None:
-            raise HTTPException(status_code=400, detail="Format gambar tidak valid")
-
-        h_img, w_img = img_bgr.shape[:2]
-
-        # Inferensi YOLO Samping
-        results_yolo = yolo_samping_model(img_bgr, conf=0.25, imgsz=640, verbose=False)[0]
-        boxes = results_yolo.boxes
-        masks = results_yolo.masks
-
-        tanaman_list = []
-        tray_box = None
-
-        if boxes is not None and len(boxes) > 0:
-            for i, box in enumerate(boxes):
-                cls_id = int(box.cls[0])
-                cls_name = yolo_samping_model.names.get(cls_id, "")
-                conf = float(box.conf[0])
-                xyxy = box.xyxy[0].cpu().numpy()
-                mask_poly = masks.xy[i] if masks is not None else None
-
-                if "tray" in cls_name.lower():
-                    tray_box = xyxy
-                elif "batang" in cls_name.lower():
-                    tanaman_list.append({
-                        "box": xyxy,
-                        "conf": conf,
-                        "poly": mask_poly
-                    })
-
-        if tray_box is not None:
-            tx1, ty1, tx2, ty2 = tray_box
-            tray_w_px = max(1.0, tx2 - tx1)
-            scale_cm_per_px = tray_width_cm / tray_w_px
-            baseline_y = ty1
-        else:
-            scale_cm_per_px = 0.05
-            baseline_y = max([t["box"][3] for t in tanaman_list]) if tanaman_list else h_img - 20
-
-        vis_bgr = img_bgr.copy()
-
-        # Garis acuan tray bawah (disembunyikan agar tampilan hasil analisa lebih bersih dan fokus pada tanaman)
-        # AI tetap menggunakan tray_box di latar belakang untuk kalibrasi tinggi cm yang akurat.
-        show_tray_line = False
-        if show_tray_line and tray_box is not None:
-            by = int(baseline_y)
-            x_start = int(tray_box[0])
-            x_end = int(tray_box[2])
-            # Garis horizontal batas tray (Merah)
-            cv2.line(vis_bgr, (x_start, by), (x_end, by), (0, 0, 255), 2, cv2.LINE_AA)
-            # Label teks di bawah garis agar tidak menabrak kotak tanaman
-            cv2.putText(vis_bgr, "--- BATAS TRAY (0 cm) ---", (x_start + 6, min(h_img - 6, by + 16)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 255), 1, cv2.LINE_AA)
-
-        tanaman_list = sorted(tanaman_list, key=lambda t: t["box"][0])
-        results_detail = []
-        counts = {"normal": 0, "etiolasi_ringan": 0, "etiolasi_berat": 0}
-        all_heights = []
-        placed_badges = []
-
-        for idx, t in enumerate(tanaman_list, 1):
-            x1, y1, x2, y2 = map(int, t["box"])
-            poly = t["poly"]
-
-            pucuk_y = int(np.min(poly[:, 1])) if poly is not None and len(poly) > 0 else y1
-            pangkal_y = int(baseline_y) if baseline_y > pucuk_y else y2
-
-            tinggi_px = max(1, pangkal_y - pucuk_y)
-            tinggi_cm = round(float(tinggi_px * scale_cm_per_px), 2)
-            all_heights.append(tinggi_cm)
-
-            # Analisis Warna Batang (40% bawah)
-            stem_y_start = int(pucuk_y + 0.60 * tinggi_px)
-            stem_y_end = min(h_img, pangkal_y)
-            stem_crop = img_bgr[stem_y_start:stem_y_end, max(0, x1):min(w_img, x2)]
-
-            is_pale = False
-            color_desc = "Hijau"
-            if stem_crop.size > 0:
-                hsv = cv2.cvtColor(stem_crop, cv2.COLOR_BGR2HSV)
-                pale_mask = cv2.inRange(hsv, (0, 0, 150), (180, 55, 255))
-                green_mask = cv2.inRange(hsv, (25, 40, 40), (85, 255, 255))
-                pale_ratio = float(np.mean(pale_mask > 0))
-                green_ratio = float(np.mean(green_mask > 0))
-
-                if pale_ratio >= 0.25 and green_ratio < 0.20:
-                    is_pale = True
-                    color_desc = f"Pucat ({pale_ratio:.0%})"
-                else:
-                    color_desc = f"Hijau ({green_ratio:.0%})"
-
-            if tinggi_cm <= 10.0:
-                status = "Normal"
-                color_bgr = (0, 220, 0)
-                counts["normal"] += 1
-            elif is_pale:
-                status = "Etiolasi Berat"
-                color_bgr = (0, 0, 230)
-                counts["etiolasi_berat"] += 1
-            else:
-                status = "Etiolasi Ringan"
-                color_bgr = (0, 165, 255)
-                counts["etiolasi_ringan"] += 1
-
-            # Gambar Kotak Bounding Box
-            cv2.rectangle(vis_bgr, (x1, y1), (x2, y2), color_bgr, 2)
-
-            # Garis ukur tinggi
-            cx = int((x1 + x2) / 2)
-            cv2.line(vis_bgr, (cx, pangkal_y), (cx, pucuk_y), (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.circle(vis_bgr, (cx, pucuk_y), 3, (0, 255, 255), -1)
-
-            # Anti-collision Staggered Badge (Penyusunan label bertingkat agar tidak bertumpuk)
-            label_txt = f"{status} {tinggi_cm:.1f}cm"
-            font_scale = 0.42
-            font_thick = 1
-            (tw, th), _ = cv2.getTextSize(label_txt, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
-
-            badge_w = tw + 8
-            badge_h = th + 6
-            bx1 = max(4, min(w_img - badge_w - 4, cx - badge_w // 2))
-            bx2 = bx1 + badge_w
-
-            chosen_level = 0
-            best_by1 = max(4, y1 - badge_h - 4)
-            best_by2 = best_by1 + badge_h
-
-            for level in range(5):
-                cand_by2 = y1 - 4 - (level * (badge_h + 8))
-                cand_by1 = cand_by2 - badge_h
-                if cand_by1 < 4:
-                    break
-
-                collision = False
-                for (ox1, oy1, ox2, oy2) in placed_badges:
-                    if not (bx2 + 4 < ox1 or bx1 - 4 > ox2 or cand_by2 + 2 < oy1 or cand_by1 - 2 > oy2):
-                        collision = True
-                        break
-
-                if not collision:
-                    chosen_level = level
-                    best_by1 = cand_by1
-                    best_by2 = cand_by2
-                    break
-                else:
-                    chosen_level = level
-                    best_by1 = cand_by1
-                    best_by2 = cand_by2
-
-            placed_badges.append((bx1, best_by1, bx2, best_by2))
-
-            # Jika berada di tingkat lebih tinggi (level > 0), gambar garis penunjuk (leader line)
-            if chosen_level > 0:
-                cv2.line(vis_bgr, (cx, best_by2), (cx, y1), color_bgr, 1, cv2.LINE_AA)
-                cv2.circle(vis_bgr, (cx, y1), 2, color_bgr, -1)
-
-            # Gambar solid badge label
-            cv2.rectangle(vis_bgr, (bx1, best_by1), (bx2, best_by2), color_bgr, -1)
-            text_color = (0, 0, 0) if status == "Etiolasi Ringan" else (255, 255, 255)
-            text_y = best_by1 + th + 3
-            cv2.putText(vis_bgr, label_txt, (bx1 + 4, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, font_thick, cv2.LINE_AA)
-
-            results_detail.append({
-                "id": idx,
-                "status": status,
-                "tinggi_cm": tinggi_cm,
-                "tinggi_px": tinggi_px,
-                "warna_batang": color_desc,
-                "bbox": [x1, y1, x2, y2]
-            })
-
-        total_tanaman = len(results_detail)
-        avg_height = round(float(np.mean(all_heights)), 1) if all_heights else 0.0
-        normal_cnt = counts["normal"]
-        ringan_cnt = counts["etiolasi_ringan"]
-        berat_cnt = counts["etiolasi_berat"]
-
-        pct_normal = round((normal_cnt / total_tanaman * 100), 1) if total_tanaman > 0 else 0.0
-        pct_etiolasi = round(100.0 - pct_normal, 1)
-
-        if berat_cnt > 0:
-            status_overall = "Etiolasi Berat Terdeteksi (Kutilang)"
-            rekomendasi = f"Ditemukan {berat_cnt} batang meninggi pucat (>10 cm). Batang rapuh, segera turunkan intensitas jarak lampu dan berikan sirkulasi udara."
-        elif ringan_cnt > 0:
-            status_overall = "Etiolasi Ringan Terdeteksi"
-            rekomendasi = f"Ditemukan {ringan_cnt} batang mulai meninggi (>10 cm) namun masih hijau. Tambahkan durasi penyinaran 1-2 jam."
-        else:
-            status_overall = "Batang Kokoh (Normal)"
-            rekomendasi = f"Semua {total_tanaman} batang tanaman tumbuh proporsional (<=10 cm, rata-rata {avg_height} cm). Kondisi pencahayaan saat ini sangat tepat."
-
-        _, enc_jpg = cv2.imencode(".jpg", vis_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        annotated_b64 = "data:image/jpeg;base64," + base64.b64encode(enc_jpg.tobytes()).decode("ascii")
-
-        return {
-            "success": True,
-            "total_tanaman": total_tanaman,
-            "biji_terdeteksi": total_tanaman,
-            "tinggi_rata_rata": avg_height,
-            "normal": normal_cnt,
-            "etiolasi_ringan": ringan_cnt,
-            "etiolasi_berat": berat_cnt,
-            "persentase_normal": pct_normal,
-            "persentase_etiolasi": pct_etiolasi,
-            "status_keseluruhan": status_overall,
-            "rekomendasi": rekomendasi,
-            "annotated_image": annotated_b64,
-            "detail_tanaman": results_detail
-        }
-
+        return await run_in_threadpool(_run_side_inference, contents, tray_width_cm)
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()

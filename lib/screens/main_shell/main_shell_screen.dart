@@ -40,7 +40,10 @@ class _MainShellScreenState extends State<MainShellScreen> {
   bool _sprayerOn = false;
   bool _lamp1On = true;
   bool _lamp2On = false;
-  bool _hasInitialTelemetry = false;
+  bool? _lastNotifiedKipas;
+  bool? _lastNotifiedSprayer;
+  bool? _lastNotifiedLamp1;
+  bool? _lastNotifiedLamp2;
 
 
 Future<void> _savePlants() async {
@@ -105,7 +108,7 @@ Future<void> _loadSavedPlants() async {
         jumlahLampu: item['jumlahLampu'],
       ));
     }
-    if (savedActiveId != null) _activePlantId = savedActiveId;
+    _activePlantId = savedActiveId;
   });
 } 
 
@@ -116,62 +119,68 @@ Future<void> _loadSavedPlants() async {
 
   // Plant Profiles State
   int? _activePlantId = 1;
-  final List<PlantProfile> _plants = [
-    PlantProfile(
-      id: 1,
-      name: 'Cabe',
-      suhuMin: 25,
-      suhuMax: 30,
-      durasiSiram: 5,
-      autoAktif: true,
-      jamSiram: ['07:00', '15:00'],
-      masaGelap: 4,
-      masaTerang: 26,
-      tglMulai: DateTime(2026, 11, 10),
-      hariKe: 11,
-      faseAwal: 'Mulai dari masa gelap',
-      jamMulai: '05:30',
-      jamSelesai: '18:00',
-      jamMulaiH1: '15:00',
-      jumlahLampu: '1 Lampu Saja (Lampu Utama - GPIO 17)',
-    ),
-    PlantProfile(
-      id: 2,
-      name: 'Pakcoy',
-      suhuMin: 20,
-      suhuMax: 28,
-      durasiSiram: 10,
-      autoAktif: true,
-      jamSiram: ['08:00', '15:00'],
-      masaGelap: 2,
-      masaTerang: 12,
-      tglMulai: DateTime(2026, 11, 16),
-      hariKe: 5,
-      faseAwal: 'Mulai dari masa gelap',
-      jamMulai: '05:30',
-      jamSelesai: '18:00',
-      jamMulaiH1: '14:30',
-      jumlahLampu: '1 Lampu Saja (Lampu Utama - GPIO 17)',
-    ),
-    PlantProfile(
-      id: 3,
-      name: 'Selada',
-      suhuMin: 18,
-      suhuMax: 25,
-      durasiSiram: 8,
-      autoAktif: true,
-      jamSiram: ['08:00', '15:00'],
-      masaGelap: 2,
-      masaTerang: 14,
-      tglMulai: DateTime(2026, 11, 18),
-      hariKe: 3,
-      faseAwal: 'Mulai dari masa terang',
-      jamMulai: '05:30',
-      jamSelesai: '17:30',
-      jamMulaiH1: '15:00',
-      jumlahLampu: '2 Lampu (Utama + Booster)',
-    ),
-  ];
+  late final List<PlantProfile> _plants = _buildDefaultPlants();
+
+  static List<PlantProfile> _buildDefaultPlants() {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return [
+      PlantProfile(
+        id: 1,
+        name: 'Cabe',
+        suhuMin: 25,
+        suhuMax: 30,
+        durasiSiram: 5,
+        autoAktif: true,
+        jamSiram: ['07:00', '15:00'],
+        masaGelap: 4,
+        masaTerang: 26,
+        tglMulai: today,
+        hariKe: 1,
+        faseAwal: 'Mulai dari masa gelap',
+        jamMulai: '05:30',
+        jamSelesai: '18:00',
+        jamMulaiH1: '15:00',
+        jumlahLampu: '1 Lampu Saja (Lampu Utama - GPIO 17)',
+      ),
+      PlantProfile(
+        id: 2,
+        name: 'Pakcoy',
+        suhuMin: 20,
+        suhuMax: 28,
+        durasiSiram: 10,
+        autoAktif: true,
+        jamSiram: ['08:00', '15:00'],
+        masaGelap: 2,
+        masaTerang: 12,
+        tglMulai: today,
+        hariKe: 1,
+        faseAwal: 'Mulai dari masa gelap',
+        jamMulai: '05:30',
+        jamSelesai: '18:00',
+        jamMulaiH1: '14:30',
+        jumlahLampu: '1 Lampu Saja (Lampu Utama - GPIO 17)',
+      ),
+      PlantProfile(
+        id: 3,
+        name: 'Selada',
+        suhuMin: 18,
+        suhuMax: 25,
+        durasiSiram: 8,
+        autoAktif: true,
+        jamSiram: ['08:00', '15:00'],
+        masaGelap: 2,
+        masaTerang: 14,
+        tglMulai: today,
+        hariKe: 1,
+        faseAwal: 'Mulai dari masa terang',
+        jamMulai: '05:30',
+        jamSelesai: '17:30',
+        jamMulaiH1: '15:00',
+        jumlahLampu: '2 Lampu (Utama + Booster)',
+      ),
+    ];
+  }
 
   PlantProfile? get _activePlant {
     if (_activePlantId == null) return null;
@@ -214,11 +223,6 @@ void initState() {
     _telemetrySub = mqtt.telemetryStream.listen((telemetry) {
   if (!mounted) return;
 
-  final prevKipas = _kipasOn;
-  final prevSprayer = _sprayerOn;
-  final prevLamp1 = _lamp1On;
-  final prevLamp2 = _lamp2On;
-
   setState(() {
     if (telemetry.temperature != null) _suhu = telemetry.temperature!;
     if (telemetry.humidity != null) _lembabUdara = telemetry.humidity!;
@@ -237,14 +241,14 @@ void initState() {
     _lastUpdateTs = formatNowHms();
   });
 
-      // Kirim notifikasi hanya jika bukan data pertama dan status berubah
-      if (_hasInitialTelemetry) {
-        final isAuto = _mode == ControlMode.auto;
-        final prefix = isAuto ? 'Otomatis' : 'Manual';
-        final nowStr = _lastUpdateTs;
+      // Kirim notifikasi hanya jika status aktuator benar-benar berubah setelah data awal diterima
+      final isAuto = _mode == ControlMode.auto;
+      final prefix = isAuto ? 'Otomatis' : 'Manual';
+      final nowStr = _lastUpdateTs;
 
-        if (telemetry.fanRelay != null && telemetry.fanRelay != prevKipas) {
-          final on = telemetry.fanRelay!;
+      if (telemetry.fanRelay != null) {
+        final on = telemetry.fanRelay!;
+        if (_lastNotifiedKipas != null && on != _lastNotifiedKipas) {
           NotificationService.instance.show(
             id: 1,
             title: isAuto
@@ -255,10 +259,12 @@ void initState() {
                 : '[$nowStr] Kipas dimatikan. Suhu saat ini: ${_suhu.toStringAsFixed(1)}°C.',
           );
         }
+        _lastNotifiedKipas = on;
+      }
 
-        if (telemetry.sprayerRelay != null &&
-            telemetry.sprayerRelay != prevSprayer) {
-          final on = telemetry.sprayerRelay!;
+      if (telemetry.sprayerRelay != null) {
+        final on = telemetry.sprayerRelay!;
+        if (_lastNotifiedSprayer != null && on != _lastNotifiedSprayer) {
           NotificationService.instance.show(
             id: 2,
             title: '$prefix: Sprayer ${on ? "Menyala" : "Mati"}',
@@ -267,9 +273,12 @@ void initState() {
                 : '[$nowStr] Penyiraman selesai dan sprayer dimatikan.',
           );
         }
+        _lastNotifiedSprayer = on;
+      }
 
-        if (telemetry.lamp1Relay != null && telemetry.lamp1Relay != prevLamp1) {
-          final on = telemetry.lamp1Relay!;
+      if (telemetry.lamp1Relay != null) {
+        final on = telemetry.lamp1Relay!;
+        if (_lastNotifiedLamp1 != null && on != _lastNotifiedLamp1) {
           NotificationService.instance.show(
             id: 3,
             title: '$prefix: Lampu 1 ${on ? "Menyala" : "Mati"}',
@@ -278,9 +287,12 @@ void initState() {
                 : '[$nowStr] Lampu utama grow light dimatikan.',
           );
         }
+        _lastNotifiedLamp1 = on;
+      }
 
-        if (telemetry.lamp2Relay != null && telemetry.lamp2Relay != prevLamp2) {
-          final on = telemetry.lamp2Relay!;
+      if (telemetry.lamp2Relay != null) {
+        final on = telemetry.lamp2Relay!;
+        if (_lastNotifiedLamp2 != null && on != _lastNotifiedLamp2) {
           NotificationService.instance.show(
             id: 4,
             title: '$prefix: Lampu 2 ${on ? "Menyala" : "Mati"}',
@@ -289,8 +301,7 @@ void initState() {
                 : '[$nowStr] Lampu booster (Lampu 2) dimatikan.',
           );
         }
-      } else {
-        _hasInitialTelemetry = true;
+        _lastNotifiedLamp2 = on;
       }
 });
 
@@ -487,6 +498,7 @@ void initState() {
         _lamp2On = false;
       }
     });
+    _savePlants();
     _showSnack('Tanaman dinonaktifkan. Pilih tanaman untuk mode AUTO.');
   }
 
@@ -500,6 +512,7 @@ void initState() {
         _lamp2On = p.jumlahLampu.startsWith('2');
       }
     });
+    _savePlants();
     final p = _activePlant;
     if (p != null) {
       final lampsCount = p.jumlahLampu.startsWith('2') ? 2 : 1;
@@ -533,6 +546,7 @@ void initState() {
         _activePlantId = null;
       }
     });
+    _savePlants();
     _showSnack('Profil "${target.name}" dihapus');
   }
 
@@ -552,6 +566,7 @@ void initState() {
         _plants.insert(0, result);
       }
     });
+    _savePlants();
 
     if (existing != null && _activePlantId == result.id) {
       final lampsCount = result.jumlahLampu.startsWith('2') ? 2 : 1;

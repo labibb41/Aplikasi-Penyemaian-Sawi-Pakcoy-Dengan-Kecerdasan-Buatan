@@ -116,6 +116,7 @@ class MqttService {
   static const String topicStatus = '$topicPrefix/status';
   static const String topicCommand = '$topicPrefix/command';
   static const String topicAlert = '$topicPrefix/alert';
+  static const String topicServerUrl = 'semaiku/config/server_url';
 
   MqttClient? _client;
   StreamSubscription<List<MqttReceivedMessage<MqttMessage>>>? _updatesSub;
@@ -133,6 +134,10 @@ class MqttService {
 
   IncubatorTelemetry? _latestTelemetry;
   IncubatorTelemetry? get latestTelemetry => _latestTelemetry;
+
+  // Stream untuk URL server yang diterima via MQTT (Cloudflare Tunnel)
+  final _serverUrlController = StreamController<String>.broadcast();
+  Stream<String> get serverUrlStream => _serverUrlController.stream;
 
   bool _isConnecting = false;
 
@@ -219,11 +224,12 @@ class MqttService {
       return;
     }
 
-    // Subscribe to telemetry, status, and alert
+    // Subscribe to telemetry, status, alert, and server URL config
     final topics = [
       topicTelemetry,
       topicStatus,
       topicAlert,
+      topicServerUrl,
     ];
 
     for (final t in topics) {
@@ -238,10 +244,19 @@ class MqttService {
   void _onMessageReceived(List<MqttReceivedMessage<MqttMessage>> messages) {
     for (final msg in messages) {
       final recMess = msg.payload as MqttPublishMessage;
-      final payloadString =
-          utf8.decode(recMess.payload.message);
+      final payloadString = utf8.decode(recMess.payload.message);
 
       debugPrint('[MQTT RECV] [${msg.topic}] $payloadString');
+
+      // Topik konfigurasi URL server AI (dari Cloudflare Tunnel / start_all.py)
+      if (msg.topic == topicServerUrl) {
+        final url = payloadString.trim();
+        if (url.startsWith('http://') || url.startsWith('https://')) {
+          debugPrint('[MQTT] URL server AI diterima: $url');
+          _serverUrlController.add(url);
+        }
+        continue;
+      }
 
       try {
         final decoded = jsonDecode(payloadString);
@@ -371,5 +386,6 @@ class MqttService {
     disconnect();
     _statusController.close();
     _telemetryController.close();
+    _serverUrlController.close();
   }
 }

@@ -6,8 +6,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/constants/app_colors.dart';
+import '../../../core/services/mqtt/mqtt_service.dart';
+import '../../../core/utils/server_url_utils.dart';
 import '../../../core/utils/snackbar_utils.dart';
 
 class EtiolasiTab extends StatefulWidget {
@@ -20,13 +23,18 @@ class EtiolasiTab extends StatefulWidget {
 class _EtiolasiTabState extends State<EtiolasiTab> {
   final ImagePicker _picker = ImagePicker();
 
-  // Konfigurasi Server AI Laptop (Auto-Discovery)
-  String _serverIp = kIsWeb ? 'localhost' : '192.168.100.9';
-  final int _serverPort = 8000;
-  String get _serverBaseUrl => 'http://$_serverIp:$_serverPort';
+  // ── Konfigurasi Server AI ──────────────────────────────────────────────────
+  // _serverBaseUrl menyimpan URL lengkap, contoh:
+  //   - http://192.168.100.9:8000  (jaringan lokal)
+  //   - https://abc.trycloudflare.com  (via Cloudflare Tunnel)
+  String _serverBaseUrl = kIsWeb
+      ? 'http://localhost:8000'
+      : normalizeServerUrl('192.168.100.9');
 
   bool _isDiscoveringServer = false;
   bool _isServerOnline = false;
+
+  StreamSubscription<String>? _serverUrlSub;
 
   // Sisi Atas (Top View)
   XFile? _topImage;
@@ -45,51 +53,102 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
   @override
   void initState() {
     super.initState();
-    // Otomatis cari IP server laptop begitu menu dibuka!
+    _loadSavedServerUrl();
+    _listenMqttServerUrl();
+    // Otomatis cari server begitu menu dibuka!
     _autoDiscoverServer();
   }
 
-  /// Memindai jaringan secara otomatis untuk menemukan IP laptop tanpa perlu input manual.
+  @override
+  void dispose() {
+    _serverUrlSub?.cancel();
+    super.dispose();
+  }
+
+  /// Muat URL server yang sudah disimpan sebelumnya dari SharedPreferences.
+  Future<void> _loadSavedServerUrl() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString('semaiku_server_url');
+    if (saved != null && saved.isNotEmpty && mounted) {
+      setState(() => _serverBaseUrl = saved);
+    }
+  }
+
+  /// Subscribe ke stream URL server dari MQTT (dikirim oleh start_all.py via Cloudflare Tunnel).
+  void _listenMqttServerUrl() {
+    _serverUrlSub = MqttService.instance.serverUrlStream.listen((url) async {
+      if (!mounted) return;
+      final normalized = normalizeServerUrl(url);
+      // Simpan ke preferences
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('semaiku_server_url', normalized);
+
+      setState(() {
+        _serverBaseUrl = normalized;
+        _isServerOnline = false; // reset, akan dicek ulang
+      });
+
+      if (mounted) {
+        showAppSnackBar(
+          context,
+          '🌐 URL server AI diperbarui via MQTT: $normalized',
+          icon: Icons.cloud_done_rounded,
+          iconColor: const Color(0xFF4ADE80),
+        );
+      }
+
+      // Langsung cek koneksi ke URL baru
+      final ok = await _pingServer(normalized);
+      if (mounted) setState(() => _isServerOnline = ok);
+    });
+  }
+
+  /// Memindai jaringan secara otomatis untuk menemukan server tanpa perlu input manual.
+  /// Mendukung URL lokal (IP) maupun Cloudflare Tunnel.
   Future<void> _autoDiscoverServer({bool showFeedback = false}) async {
     if (_isDiscoveringServer) return;
     setState(() => _isDiscoveringServer = true);
 
-    String? foundIp;
+    String? foundUrl;
 
-    // Tahap 1: Cek kandidat langsung (Sangat cepat & akurat untuk Chrome Laptop maupun HP)
-    final directCandidates = <String>{
+    // Tahap 1: Cek URL yang sudah tersimpan (termasuk URL Cloudflare Tunnel via MQTT)
+    final candidateUrls = <String>{
+      _serverBaseUrl,
       if (kIsWeb) ...[
-        if (Uri.base.host.isNotEmpty) Uri.base.host,
-        'localhost',
-        '127.0.0.1',
+        if (Uri.base.host.isNotEmpty) normalizeServerUrl(Uri.base.host),
+        'http://localhost:8000',
+        'http://127.0.0.1:8000',
       ],
-      _serverIp,
-      '192.168.100.9',
-      '192.168.1.100',
+      normalizeServerUrl('192.168.100.9'),
+      normalizeServerUrl('192.168.1.100'),
     };
 
-    for (final testIp in directCandidates) {
-      if (await _pingServer(testIp)) {
-        foundIp = testIp;
+    for (final testUrl in candidateUrls) {
+      if (await _pingServer(testUrl)) {
+        foundUrl = testUrl;
         break;
       }
     }
 
-    // Tahap 2: Kirim Sinyal UDP Broadcast jika IP tersimpan belum merespons (Khusus HP / Android)
-    if (foundIp == null && !kIsWeb) {
-      foundIp = await _udpDiscover();
+    // Tahap 2: UDP Broadcast untuk discovery di jaringan lokal (Khusus HP / Android)
+    if (foundUrl == null && !kIsWeb) {
+      final foundIp = await _udpDiscover();
+      if (foundIp != null) foundUrl = normalizeServerUrl(foundIp);
     }
 
     // Tahap 3: Pemindaian Subnet Lokal Cepat (Fallback jika router blokir broadcast)
-    if (foundIp == null && !kIsWeb) {
-      foundIp = await _fastSubnetScan();
+    if (foundUrl == null && !kIsWeb) {
+      final foundIp = await _fastSubnetScan();
+      if (foundIp != null) foundUrl = normalizeServerUrl(foundIp);
     }
 
     if (!mounted) return;
 
-    if (foundIp != null) {
+    if (foundUrl != null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('semaiku_server_url', foundUrl);
       setState(() {
-        _serverIp = foundIp!;
+        _serverBaseUrl = foundUrl!;
         _isServerOnline = true;
         _isDiscoveringServer = false;
       });
@@ -113,12 +172,14 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
     }
   }
 
-  /// Cek respons server melalui HTTP GET /api/health
-  Future<bool> _pingServer(String ip) async {
+  /// Cek respons server melalui HTTP GET /api/health.
+  /// Menerima URL lengkap (http://IP:8000 atau https://xxx.trycloudflare.com).
+  Future<bool> _pingServer(String urlOrIp) async {
     try {
+      final baseUrl = normalizeServerUrl(urlOrIp);
       final res = await http
-          .get(Uri.parse('http://$ip:$_serverPort/api/health'))
-          .timeout(const Duration(milliseconds: 1200));
+          .get(Uri.parse('$baseUrl/api/health'))
+          .timeout(const Duration(milliseconds: 2500));
       return res.statusCode == 200;
     } catch (_) {
       return false;
@@ -206,7 +267,7 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
 
           final futures = targetHosts.map((h) async {
             final testIp = '$prefix.$h';
-            final isUp = await _pingServer(testIp);
+            final isUp = await _pingServer(normalizeServerUrl(testIp));
             return isUp ? testIp : null;
           });
 
@@ -260,7 +321,7 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
   }
 
   void _showServerConfigDialog() {
-    final ctrl = TextEditingController(text: _serverIp);
+    final ctrl = TextEditingController(text: displayServerInput(_serverBaseUrl));
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -270,7 +331,7 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
             Icon(Icons.laptop_chromebook_rounded, color: AppColors.primary),
             SizedBox(width: 8),
             Text(
-              'Pengaturan IP Server AI',
+              'Pengaturan Server AI',
               style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
             ),
           ],
@@ -280,15 +341,15 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Aplikasi mendeteksi IP laptop secara otomatis. Anda juga bisa memasukkan IP secara manual jika diperlukan:',
+              'Aplikasi mendeteksi server secara otomatis (via MQTT atau jaringan lokal). Anda juga bisa memasukkan alamat server secara manual:',
               style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: ctrl,
               decoration: InputDecoration(
-                prefixText: 'http://',
-                suffixText: ':$_serverPort',
+                hintText: '192.168.100.9 atau https://xxx.trycloudflare.com',
+                hintStyle: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
@@ -323,11 +384,15 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
             child: const Text('Batal'),
           ),
           FilledButton(
-            onPressed: () {
-              final newIp = ctrl.text.trim();
-              if (newIp.isNotEmpty) {
+            onPressed: () async {
+              final raw = ctrl.text.trim();
+              if (raw.isNotEmpty) {
+                final normalized = normalizeServerUrl(raw);
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setString('semaiku_server_url', normalized);
+                if (!ctx.mounted) return;
                 setState(() {
-                  _serverIp = newIp;
+                  _serverBaseUrl = normalized;
                   _isServerOnline = false;
                 });
                 Navigator.pop(ctx);
@@ -445,7 +510,7 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
       );
 
       final streamedResponse = await request.send().timeout(
-        const Duration(seconds: 35),
+        const Duration(seconds: 60),
       );
       final response = await http.Response.fromStream(streamedResponse);
 
@@ -485,6 +550,15 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
       } else {
         throw Exception('Server error: HTTP ${response.statusCode}');
       }
+    } on TimeoutException {
+      if (!mounted) return;
+      setState(() => _isAnalyzingTop = false);
+      showAppSnackBar(
+        context,
+        'Waktu analisis habis (timeout 60 dtk). Coba ulangi atau pastikan laptop tidak sedang berat.',
+        icon: Icons.timer_off_rounded,
+        iconColor: const Color(0xFFF87171),
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -528,7 +602,7 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
       );
 
       final streamedResponse = await request.send().timeout(
-        const Duration(seconds: 35),
+        const Duration(seconds: 60),
       );
       final response = await http.Response.fromStream(streamedResponse);
 
@@ -567,6 +641,15 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
       } else {
         throw Exception('Server error: HTTP ${response.statusCode}');
       }
+    } on TimeoutException {
+      if (!mounted) return;
+      setState(() => _isAnalyzingSide = false);
+      showAppSnackBar(
+        context,
+        'Waktu analisis sisi samping habis (timeout 60 dtk). Coba ulangi.',
+        icon: Icons.timer_off_rounded,
+        iconColor: const Color(0xFFF87171),
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -1813,8 +1896,8 @@ class _EtiolasiTabState extends State<EtiolasiTab> {
                           _isDiscoveringServer
                               ? 'Mencari Server Laptop Otomatis...'
                               : _isServerOnline
-                              ? 'Server Terhubung: $_serverIp (Otomatis)'
-                              : 'Server Belum Aktif ($_serverIp)',
+                              ? 'Server Terhubung: ${displayServerInput(_serverBaseUrl)}'
+                              : 'Server Belum Aktif (${displayServerInput(_serverBaseUrl)})',
                           style: TextStyle(
                             fontSize: 11,
                             fontWeight: FontWeight.w700,

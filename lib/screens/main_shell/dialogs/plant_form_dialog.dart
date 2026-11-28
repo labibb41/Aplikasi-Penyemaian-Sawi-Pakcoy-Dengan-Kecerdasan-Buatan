@@ -1,4 +1,4 @@
-﻿import 'dart:math';
+import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../../../core/constants/app_colors.dart';
@@ -62,9 +62,10 @@ class _PlantFormDialogState extends State<PlantFormDialog> {
     _gelapCtrl = TextEditingController(text: (e?.masaGelap ?? 2).toString());
     _terangCtrl = TextEditingController(text: (e?.masaTerang ?? 12).toString());
 
+    final now = DateTime.now();
     _autoAktif = e?.autoAktif ?? true;
     _jamSiram = e != null ? List<String>.from(e.jamSiram) : ['08:00', '15:00'];
-    _tglMulai = e?.tglMulai ?? DateTime(2026, 11, 20);
+    _tglMulai = e?.tglMulai ?? DateTime(now.year, now.month, now.day);
     _faseAwal = e?.faseAwal ?? _faseOptions.first;
     _jamMulai = e?.jamMulai ?? '05:30';
     _jamSelesai = e?.jamSelesai ?? '18:00';
